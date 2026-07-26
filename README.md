@@ -18,6 +18,16 @@
 
 ---
 
+<p align="center">
+  <a href="https://www.youtube.com/watch?v=chK_pnV1wqQ">
+    <img src="assets/youtube-thumbnail.jpg" alt="Vox AI Motion Graphics Generator video" width="640">
+  </a>
+</p>
+
+<p align="center">
+  <a href="https://www.youtube.com/watch?v=chK_pnV1wqQ"><b>📺 Watch the Vox AI Motion Graphics Generator in action →</b></a>
+</p>
+
 ### 🚨 The problem with making explainer videos today:
 - ❌ **Fragmented workflow** — separate tools for scripting, image gen, animation, voice-over, music, and captions
 - ❌ **No narrative structure** — raw text-to-video models don't understand story arcs, hooks, or pacing
