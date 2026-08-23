@@ -111,8 +111,9 @@ def run(project_dir):
         if sum(durs) < need:
             durs[-1] += need - sum(durs)
         for s, d in zip(shot_list, durs):
-            segs.append({"clip": s["clip_path"], "dur": round(d, 2)})
-            t += d
+            encoded_dur = round(d, 2)
+            segs.append({"clip": s["clip_path"], "dur": encoded_dur})
+            t += encoded_dur
         beat_spans.append({"start": beat_start, "dur": round(t - beat_start, 2), "beat": beat})
     total = round(t, 2)
 
@@ -159,14 +160,14 @@ def run(project_dir):
     filter_lines = []
     if amix_filters:
         filter_lines.extend(amix_filters)
-        ins = "".join(f"[a{i+1}]" for i in range(len(beat_spans)))
-        filter_lines.append(f"{ins}amix=inputs={len(beat_spans)}:duration=first:dropout_transition=0.5[vo];")
+        ins = "".join(f"[a{i+1}]" for i in range(len(amix_filters)))
+        filter_lines.append(f"{ins}amix=inputs={len(amix_filters)}:duration=longest:dropout_transition=0.5[vo];")
         if has_bgm:
             filter_lines.append(
                 f"[{bgm_idx}:a]volume={music_vol}[bgm0];"
                 f"[vo]asplit=2[vo1][vo2];"
                 f"[bgm0][vo1]sidechaincompress=threshold=0.08:ratio=6:attack=15:release=250[bgm_ducked];"
-                f"[vo2][bgm_ducked]amix=inputs=2:duration=first:weights=1.2 0.7[aout]"
+                f"[vo2][bgm_ducked]amix=inputs=2:duration=longest:weights=1.2 0.7[aout]"
             )
         else:
             filter_lines.append(f"[vo]anull[aout]")
@@ -175,10 +176,10 @@ def run(project_dir):
     else:
         filter_lines.append("anullsrc=channel_layout=stereo:sample_rate=44100[aout]")
 
-    full_filter = "".join(filter_lines)
+    full_filter = "".join(filter_lines) + ";[aout]apad[aout_padded]"
     audio_full = os.path.join(tmp, "audio_mixed.m4a")
     ff(["-i", v_concat, *narr_inputs, "-filter_complex", full_filter,
-        "-map", "[aout]", "-t", f"{total}", "-c:a", "aac", "-b:a", "192k", audio_full])
+        "-map", "[aout_padded]", "-t", f"{total}", "-c:a", "aac", "-b:a", "192k", audio_full])
 
     caption_mode, ass_path = _prepare_captions(project_dir, beat_spans, doc, W, H)
     cap_overlays = []

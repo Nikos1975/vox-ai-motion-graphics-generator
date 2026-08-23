@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -27,6 +28,13 @@ def _load_model(model_size: str, device: str, compute_type: str):
             "Install with: pip install -r requirements-captions.txt"
         ) from exc
     return WhisperModel(model_size, device=device, compute_type=compute_type)
+
+
+def _is_missing_cuda_runtime(exc: RuntimeError) -> bool:
+    message = str(exc).lower()
+    missing_library = any(name in message for name in ("cublas", "cudnn", "cufft"))
+    load_failure = "not found" in message or "cannot be loaded" in message
+    return missing_library and load_failure
 
 
 def _transcribe_with_model(model: Any, audio_path: Path, language: str | None) -> dict[str, Any]:
@@ -87,7 +95,7 @@ def merge_beat_transcripts(
         for segment in local.get("segments", []):
             words = []
             for item in segment.get("words", []):
-                start = base + float(item["start"])
+                start = max(base, base + float(item["start"]))
                 end = base + float(item["end"])
                 if start >= limit:
                     continue
@@ -139,6 +147,28 @@ def _source_fingerprint(beat_spans: Iterable[dict[str, Any]]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _is_valid_cached_transcript(cached: Any) -> bool:
+    if not isinstance(cached, dict) or cached.get("schema_version") != 1:
+        return False
+    segments = cached.get("segments")
+    if not isinstance(segments, list):
+        return False
+    for segment in segments:
+        if not isinstance(segment, dict) or not isinstance(segment.get("words"), list):
+            return False
+        for word in segment["words"]:
+            if not isinstance(word, dict) or not isinstance(word.get("word"), str):
+                return False
+            try:
+                start = float(word["start"])
+                end = float(word["end"])
+            except (KeyError, TypeError, ValueError):
+                return False
+            if not math.isfinite(start) or not math.isfinite(end):
+                return False
+    return True
+
+
 def build_timeline_transcript(
     project_dir: str | Path,
     beat_spans: list[dict[str, Any]],
@@ -158,26 +188,36 @@ def build_timeline_transcript(
         try:
             cached = json.loads(transcript_path.read_text(encoding="utf-8"))
             if (
-                cached.get("source_fingerprint") == fingerprint
+                _is_valid_cached_transcript(cached)
+                and cached.get("source_fingerprint") == fingerprint
                 and cached.get("model") == model_size
                 and cached.get("requested_language") == language
+                and cached.get("compute_type") == compute_type
             ):
                 return cached
         except (OSError, json.JSONDecodeError):
             pass
 
-    model = _load_model(model_size, device, compute_type)
+    def transcribe_with(model: Any) -> dict[str, Any]:
+        def transcribe_one(audio_path: Path) -> dict[str, Any]:
+            return _transcribe_with_model(model, audio_path, language)
 
-    def transcribe_one(audio_path: Path) -> dict[str, Any]:
-        return _transcribe_with_model(model, audio_path, language)
+        return merge_beat_transcripts(beat_spans, transcribe_one, language=language)
 
-    merged = merge_beat_transcripts(beat_spans, transcribe_one, language=language)
+    try:
+        merged = transcribe_with(_load_model(model_size, device, compute_type))
+    except RuntimeError as exc:
+        if device.strip().lower() != "auto" or not _is_missing_cuda_runtime(exc):
+            raise
+        print("Word-timed captions: CUDA runtime unavailable; retrying transcription on CPU.")
+        merged = transcribe_with(_load_model(model_size, "cpu", compute_type))
     merged.update(
         {
             "schema_version": 1,
             "source_fingerprint": fingerprint,
             "model": model_size,
             "requested_language": language,
+            "compute_type": compute_type,
         }
     )
     transcript_path.write_text(

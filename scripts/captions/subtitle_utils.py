@@ -29,5 +29,5 @@ def ffmpeg_filter_path(path: str) -> str:
     """Escape a path for use inside an ffmpeg filter argument on Windows/POSIX."""
     normalized = str(path).replace("\\", "/")
     normalized = normalized.replace(":", r"\:")
-    normalized = normalized.replace("'", r"\'")
+    normalized = normalized.replace("'", r"'\\\''")
     return normalized

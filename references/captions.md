@@ -23,7 +23,7 @@ per-beat narration audio
 → final.mp4
 ```
 
-The cached transcript is keyed by narration-audio SHA-256 plus each beat's final timeline start/duration, model size, and requested language. Changing any of those causes a new transcription.
+The cached transcript is keyed by narration-audio SHA-256 plus each beat's final timeline start/duration, model size, requested language, and compute type. Changing any of those causes a new transcription. The execution device is not part of the cache identity because it selects where the same model computation runs rather than requesting different transcript semantics.
 
 ## beats.json controls
 

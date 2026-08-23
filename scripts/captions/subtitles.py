@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any
 
@@ -18,9 +19,18 @@ def _flatten_words(transcript: dict[str, Any]) -> list[dict[str, Any]]:
                 continue
             start_f = float(start)
             end_f = float(end)
+            if not math.isfinite(start_f) or not math.isfinite(end_f):
+                continue
             if start_f < 0 or end_f <= start_f:
                 continue
-            words.append({"word": text, "start": start_f, "end": end_f})
+            words.append(
+                {
+                    "word": text,
+                    "start": start_f,
+                    "end": end_f,
+                    "beat_id": segment.get("beat_id"),
+                }
+            )
     words.sort(key=lambda item: (item["start"], item["end"]))
     return words
 
@@ -32,6 +42,12 @@ def _group_words(words: list[dict[str, Any]], style: CaptionStyle) -> list[list[
     line_chars = 0
 
     for item in words:
+        if current and item.get("beat_id") != current[0].get("beat_id"):
+            groups.append(current)
+            current = []
+            current_line = 0
+            line_chars = 0
+
         word = item["word"]
         required = len(word) + (1 if line_chars else 0)
         if current and line_chars + required > style.max_chars_per_line:
