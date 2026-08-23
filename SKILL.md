@@ -23,6 +23,7 @@ Turn a topic, talking-head video, or photo into a finished **Vox-style paper-col
 - `MUAPI_API_KEY` set in your environment (get one from https://muapi.ai).
 - `ffmpeg` + `ffprobe` installed on system path.
 - Python 3 with `Pillow` (`pip install pillow`).
+- For default word-timed B-roll/C-roll captions, install `faster-whisper` with `python -m pip install -r requirements-captions.txt`. If it is absent, assembly falls back to legacy static captions unless `"caption_required": true`.
 
 ## Workflow Steps
 
@@ -32,7 +33,7 @@ Turn a topic, talking-head video, or photo into a finished **Vox-style paper-col
 3. `python3 scripts/keyframes.py out/<project>` (Generates collage posters).
 4. `python3 scripts/clips.py out/<project>` (Animates posters into motion clips).
 5. `python3 scripts/audio.py out/<project>` (Generates TTS narration and instrumental BGM).
-6. `python3 scripts/assemble.py out/<project>` (Muxes audio, ducking, captions, watermark -> `final.mp4`).
+6. `python3 scripts/assemble.py out/<project>` (Muxes audio, ducking, word-timed captions when available, watermark -> `final.mp4`).
 
 ### A-roll Mode (Talking Head)
 1. `python3 scripts/asr_beats.py out/<project> <source.mp4>`
@@ -45,3 +46,7 @@ Turn a topic, talking-head video, or photo into a finished **Vox-style paper-col
 3. `python3 scripts/clips.py out/<project>`
 4. `python3 scripts/audio.py out/<project>`
 5. `python3 scripts/assemble.py out/<project>`
+
+## Captions
+
+B-roll/C-roll assembly defaults to `"caption_mode": "word"`. Narration audio is transcribed locally with faster-whisper, mapped onto the final beat timeline, rendered as ASS word-highlight captions, and burned by ffmpeg/libass. Use `"caption_mode": "static"` for the previous whole-beat PNG captions or `"caption_mode": "off"` to disable captions. See `references/captions.md` for styles and configuration.
