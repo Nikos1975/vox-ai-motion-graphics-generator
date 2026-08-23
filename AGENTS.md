@@ -16,7 +16,7 @@ This repository is an **Agent Skill**: a self-contained workflow that turns a to
 - `MUAPI_API_KEY` in the environment — https://muapi.ai
 - `ffmpeg` + `ffprobe`
 - Python 3 with `Pillow`
-- For local faster-whisper word-timed captions in B-roll/C-roll and A-roll: `python -m pip install -r requirements-captions.txt`
+- A-roll requires local faster-whisper for `asr_beats.py`: `python -m pip install -r requirements-captions.txt`. B-roll/C-roll word captions use the same dependency but retain their static-caption fallback when it is absent (unless captions are required).
 
 Caption behavior:
 

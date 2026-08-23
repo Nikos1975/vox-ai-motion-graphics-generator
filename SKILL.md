@@ -23,7 +23,8 @@ Turn a topic, talking-head video, or photo into a finished **Vox-style paper-col
 - `MUAPI_API_KEY` set in your environment (get one from https://muapi.ai).
 - `ffmpeg` + `ffprobe` installed on system path.
 - Python 3 with `Pillow` (`pip install pillow`).
-- For default word-timed B-roll/C-roll captions, install `faster-whisper` with `python -m pip install -r requirements-captions.txt`. If it is absent, assembly falls back to legacy static captions unless `"caption_required": true`.
+- A-roll requires `faster-whisper` for `asr_beats.py`: install it with `python -m pip install -r requirements-captions.txt` before creating A-roll beats.
+- B-roll/C-roll use `faster-whisper` for their default word-timed captions. If it is absent, B-roll/C-roll assembly falls back to legacy static captions unless `"caption_required": true`.
 
 ## Workflow Steps
 

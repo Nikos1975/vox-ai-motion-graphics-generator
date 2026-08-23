@@ -24,7 +24,34 @@ per-beat narration audio
 → final.mp4
 ```
 
-The cached transcript is keyed by narration-audio SHA-256 plus each beat's final timeline start/duration, model size, requested language, and compute type. Changing any of those causes a new transcription. The execution device is not part of the cache identity because it selects where the same model computation runs rather than requesting different transcript semantics.
+### B-roll/C-roll cache identity
+
+The B-roll/C-roll cache is a timeline fingerprint: narration-audio SHA-256 plus
+each beat's final timeline start/duration, model size, requested language, and
+compute type. Changing any of those causes a new transcription. The execution
+device is not part of the cache identity because it selects where the same model
+computation runs rather than requesting different transcript semantics.
+
+## Canonical transcript schema
+
+B-roll, C-roll, and A-roll use the same persisted transcript shape:
+
+```json
+{
+  "language": "en",
+  "segments": [
+    {
+      "start": 0.0,
+      "end": 1.2,
+      "text": "Example words",
+      "words": [
+        {"word": "Example", "start": 0.0, "end": 0.6},
+        {"word": "words", "start": 0.6, "end": 1.2}
+      ]
+    }
+  ]
+}
+```
 
 ## beats.json controls
 
@@ -65,6 +92,13 @@ then writes a new A-roll `beats.json` with `"caption_mode": "word"`. During
 assembly, A-roll reads that same cached transcript and remaps its source word
 timestamps onto the final edit timeline. It does not transcribe again or invent
 word timings. The final A-roll retains the original source-audio segments.
+
+### A-roll cache identity
+
+Unlike the B-roll/C-roll timeline fingerprint, the A-roll cache is keyed by the
+original source-media SHA-256, model, requested language, and compute type.
+Device is deliberately excluded: it selects where the same model computation
+runs rather than changing the requested transcript semantics.
 
 A-roll accepts only `"caption_mode": "word"` and `"caption_mode": "off"`.
 `word` burns ASS captions through the shared renderer; `off` skips transcript
