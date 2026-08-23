@@ -299,14 +299,14 @@ class ArollBeatTests(unittest.TestCase):
             ):
                 asr_beats.run(str(project), str(source), language="en")
             doc = json.loads((project / "beats.json").read_text(encoding="utf-8"))
+            self.assertNotIn("source_audio_url", doc)
+            self.assertFalse((project / "_source_audio.mp3").exists())
         self.assertEqual(build.call_count, 1)
         self.assertEqual(build.call_args.args[1], source)
         self.assertEqual(doc["caption_mode"], "word")
         self.assertEqual(doc["caption_whisper_model"], "large-v3-turbo")
         self.assertEqual(doc["caption_whisper_device"], "cpu")
         self.assertEqual(doc["caption_whisper_compute_type"], "int8")
-        self.assertNotIn("source_audio_url", doc)
-        self.assertFalse((project / "_source_audio.mp3").exists())
 
     def test_run_rejects_transcript_without_valid_timed_words(self):
         with tempfile.TemporaryDirectory() as tmp:
