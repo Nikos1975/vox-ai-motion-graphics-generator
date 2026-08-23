@@ -665,14 +665,16 @@ parsed A-roll `start`, `end`, and requested duration to centiseconds with
 round-half-up before calculating the source interval, then safely floors the
 encoded duration. It rejects effective cuts shorter than one second; that is a
 narrow 24-fps/AAC rendering constraint, while normal ASR beats remain at least
-two seconds. Accepted cuts use lossless PCM WAV audio in reset-PTS PCM MOV
-intermediates. Finalization concatenates those intermediates, AAC-encodes the
-single original-speech stream once, and stream-copies the `off` video; `word`
-re-encodes only its subtitle-filtered video. No silence, mix, or duplicate
-speech stream is introduced. Probe assertions allow at most one 24-fps frame
-plus one 1024-sample AAC packet (about 62.5 ms at 48 kHz) for apparent
-container/stream duration, require starts near zero, and reject accumulated
-per-beat drift.
+two seconds. Accepted cuts use lossless PCM WAV audio. Video-only H.264
+segments are allocated frames from the cumulative PCM-audio timeline on the
+global 24-fps grid, then video and PCM audio are concatenated separately.
+Finalization AAC-encodes the single original-speech stream once and
+stream-copies the `off` video; `word` re-encodes only its subtitle-filtered
+video. No silence, mix, or duplicate speech stream is introduced. Probe
+assertions allow at most one 24-fps frame plus one 1024-sample AAC packet
+(about 62.5 ms at 48 kHz) for apparent container/stream duration, require
+starts near zero, and apply video-frame rounding only once globally rather than
+allowing accumulated per-beat drift.
 
 - [ ] **Step 4: Run all focused A-roll tests GREEN**
 

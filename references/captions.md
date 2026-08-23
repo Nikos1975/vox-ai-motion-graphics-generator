@@ -111,14 +111,16 @@ encoded cut so it never reaches past that source interval. To make short
 this is only an A-roll rendering floor (normal ASR beats are at least two
 seconds), not a transcription rule.
 
-Each accepted source cut is extracted as lossless PCM, paired with its reset-PTS
-video in a PCM MOV intermediate, and those intermediates are concatenated. The
-final has one original-speech AAC encode: `off` stream-copies the concatenated
-video, while `word` encodes only the video needed to burn subtitles. Neither
-mode mixes, pads, or duplicates speech. Container, audio, and video timestamps
-can differ from the requested edit timeline by at most one 24-fps frame plus one
-AAC packet (1024 samples, about 62.5 ms at 48 kHz); stream starts are reset near
-zero and that tolerance does not accumulate per beat.
+Each accepted source cut is extracted as lossless PCM WAV. Video-only H.264
+segments receive their frame count from the cumulative PCM-audio timeline on
+the 24-fps grid, then video and PCM audio are concatenated separately. The
+final has one original-speech AAC encode: `off` stream-copies the separately
+concatenated video, while `word` encodes only the video needed to burn
+subtitles. Neither mode mixes, pads, or duplicates speech. Container, audio,
+and video timestamps can differ from the requested edit timeline by at most one
+24-fps frame plus one AAC packet (1024 samples, about 62.5 ms at 48 kHz);
+stream starts are reset near zero and the video-frame tolerance applies once to
+the global timeline rather than accumulating per beat.
 
 ### A-roll cache identity
 

@@ -632,9 +632,10 @@ class ArollAssemblyTests(unittest.TestCase):
         self.assertAlmostEqual(mapped["segments"][0]["words"][0]["start"], 0.1)
         self.assertFalse(hasattr(aroll_assemble, "build_source_transcript"))
         self.assertFalse(hasattr(aroll_assemble, "_transcribe_with_model"))
-        mux_call = next(call for call in calls if "pcm_s16le" in call and "[v]" in call)
-        self.assertEqual(mux_call.count("-map"), 2)
-        self.assertIn("[a]", mux_call)
+        video_call = next(call for call in calls if "-frames:v" in call)
+        self.assertEqual(video_call.count("-map"), 1)
+        self.assertIn("-an", video_call)
+        self.assertEqual(sum("-vn" in call for call in calls), 1)
         final_call = calls[-1]
         self.assertIn("[a]", final_call)
         self.assertEqual(final_call.count("-map"), 2)
@@ -703,8 +704,10 @@ class ArollAssemblyTests(unittest.TestCase):
                 {"word": "second", "start": 3.1, "end": 3.5},
             ])
             calls, generate = self.run_captured(project, durations=[1.004] * 4)
-        mux_calls = [call for call in calls if "pcm_s16le" in call and "[v]" in call]
-        self.assertEqual([call[call.index("-t") + 1] for call in mux_calls], ["1.00", "1.00"])
+        extraction_calls = [call for call in calls if "-vn" in call]
+        video_calls = [call for call in calls if "-frames:v" in call]
+        self.assertEqual([call[call.index("-t") + 1] for call in extraction_calls], ["1.00", "1.00"])
+        self.assertEqual([call[call.index("-frames:v") + 1] for call in video_calls], ["24", "24"])
         self.assertEqual(
             [segment["start"] for segment in generate.call_args.args[0]["segments"]], [0.0, 1.0]
         )
@@ -727,10 +730,10 @@ class ArollAssemblyTests(unittest.TestCase):
             calls, generate = self.run_captured(project, durations=[2.0] * 4)
 
         extraction_calls = [call for call in calls if "-vn" in call]
-        mux_calls = [call for call in calls if "pcm_s16le" in call and "[v]" in call]
         self.assertEqual([call[call.index("-t") + 1] for call in extraction_calls], ["1.00", "1.00"])
         self.assertTrue(all(call[-1].endswith(".wav") for call in extraction_calls))
-        self.assertEqual([call[call.index("-t") + 1] for call in mux_calls], ["1.00", "1.00"])
+        video_calls = [call for call in calls if "-frames:v" in call]
+        self.assertEqual([call[call.index("-frames:v") + 1] for call in video_calls], ["24", "24"])
         self.assertEqual(
             [segment["start"] for segment in generate.call_args.args[0]["segments"]], [0.0, 1.0]
         )
@@ -744,6 +747,28 @@ class ArollAssemblyTests(unittest.TestCase):
         self.assertIn("-t", final_call)
         self.assertEqual(final_call[final_call.index("-t") + 1], "1.00")
 
+    def test_video_segments_use_cumulative_audio_frame_allocation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = self.make_project(tmp, "off")
+            doc_path = project / "beats.json"
+            doc = json.loads(doc_path.read_text(encoding="utf-8"))
+            clip = doc["beats"][0]["clip_path"]
+            doc["beats"] = [
+                {"id": index, "start": index * 3.0, "end": index * 3.0 + 2.03,
+                 "dur": 2.03, "clip_path": clip}
+                for index in range(8)
+            ]
+            doc_path.write_text(json.dumps(doc), encoding="utf-8")
+            calls, _generate = self.run_captured(project, durations=[2.03] * 16)
+
+        video_calls = [call for call in calls if "-frames:v" in call]
+        self.assertEqual(
+            [int(call[call.index("-frames:v") + 1]) for call in video_calls],
+            [49, 48, 49, 49, 49, 48, 49, 49],
+        )
+        self.assertTrue(all("-an" in call for call in video_calls))
+        self.assertTrue(any(call[-1].endswith("aroll_audio.wav") for call in calls))
+
     def test_centisecond_requested_cut_is_not_shortened_by_binary_float_rounding(self):
         with tempfile.TemporaryDirectory() as tmp:
             project = self.make_project(tmp, "off")
@@ -753,9 +778,9 @@ class ArollAssemblyTests(unittest.TestCase):
             doc_path.write_text(json.dumps(doc), encoding="utf-8")
             calls, _generate = self.run_captured(project, durations=[2.0, 2.0])
         extraction_call = next(call for call in calls if "-vn" in call)
-        mux_call = next(call for call in calls if "pcm_s16le" in call and "[v]" in call)
         self.assertEqual(extraction_call[extraction_call.index("-t") + 1], "1.29")
-        self.assertEqual(mux_call[mux_call.index("-t") + 1], "1.29")
+        video_call = next(call for call in calls if "-frames:v" in call)
+        self.assertEqual(video_call[video_call.index("-frames:v") + 1], "31")
         self.assertEqual(calls[-1][calls[-1].index("-t") + 1], "1.29")
 
     def test_source_cut_uses_exact_start_and_does_not_cross_beat_end(self):
@@ -771,10 +796,10 @@ class ArollAssemblyTests(unittest.TestCase):
             doc_path.write_text(json.dumps(doc), encoding="utf-8")
             calls, _generate = self.run_captured(project, durations=[2.0, 2.0])
         extraction_call = next(call for call in calls if "-vn" in call)
-        mux_call = next(call for call in calls if "pcm_s16le" in call and "[v]" in call)
         self.assertEqual(extraction_call[extraction_call.index("-ss") + 1], "1.01")
         self.assertEqual(extraction_call[extraction_call.index("-t") + 1], "1.00")
-        self.assertEqual(mux_call[mux_call.index("-t") + 1], "1.00")
+        video_call = next(call for call in calls if "-frames:v" in call)
+        self.assertEqual(video_call[video_call.index("-frames:v") + 1], "24")
 
     def test_caption_remap_uses_the_rounded_source_cut_boundary(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -799,10 +824,10 @@ class ArollAssemblyTests(unittest.TestCase):
             doc_path.write_text(json.dumps(doc), encoding="utf-8")
             calls, _generate = self.run_captured(project, durations=[2.0, 2.0])
         extraction_call = next(call for call in calls if "-vn" in call)
-        mux_call = next(call for call in calls if "pcm_s16le" in call and "[v]" in call)
         self.assertEqual(extraction_call[extraction_call.index("-ss") + 1], "1.01")
         self.assertEqual(extraction_call[extraction_call.index("-t") + 1], "1.00")
-        self.assertEqual(mux_call[mux_call.index("-t") + 1], "1.00")
+        video_call = next(call for call in calls if "-frames:v" in call)
+        self.assertEqual(video_call[video_call.index("-frames:v") + 1], "24")
 
     def test_sub_frame_source_cut_is_skipped_before_ffmpeg(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -872,7 +897,7 @@ class ArollAssemblyTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg and ffprobe required")
     def test_real_ffmpeg_nonround_and_multibeat_timelines_stay_within_media_quantum(self):
-        cases = ((1.01,), (1.29,), (2.03,), (1.01, 1.29, 2.03))
+        cases = ((1.01,), (1.29,), (2.03,), (1.01, 1.29, 2.03), (2.03,) * 8)
         quantum = 1 / aroll_assemble.FPS + 1024 / 48000
         for durations in cases:
             for caption_mode in ("off", "word"):
@@ -884,7 +909,7 @@ class ArollAssemblyTests(unittest.TestCase):
                         "ffmpeg", "-y", "-loglevel", "error",
                         "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=24",
                         "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
-                        "-t", "10", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(source),
+                        "-t", "20", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(source),
                     ], check=True)
                     start = 0.1
                     beats = []
@@ -949,6 +974,9 @@ class ArollAssemblyTests(unittest.TestCase):
                         ass = (project / "captions" / "captions.ass").read_text(encoding="utf-8")
                         for index in range(1, len(durations) + 1):
                             self.assertIn(f"beat{index}", ass)
+                        if len(durations) == 8:
+                            later_event = next(line for line in ass.splitlines() if "beat8" in line)
+                            self.assertIn(",0:00:14.21,", later_event)
 
     def test_unknown_caption_mode_fails(self):
         with self.assertRaisesRegex(ValueError, "word, off"):

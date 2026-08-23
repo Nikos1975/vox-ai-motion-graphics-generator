@@ -203,9 +203,11 @@ def run(project_dir):
     tmp = os.path.join(project_dir, "_seg")
     os.makedirs(tmp, exist_ok=True)
 
-    muxed = []
+    video_segments = []
+    audio_segments = []
     edit_spans = []
-    output_start = 0.0
+    audio_timeline_end = Decimal("0")
+    previous_frame_end = 0
     for beat in doc["beats"]:
         clip = beat.get("clip_path")
         if not clip or not os.path.exists(clip):
@@ -246,44 +248,67 @@ def run(project_dir):
         if encoded_dur < MIN_RENDER_DUR:
             print(f"[{beat['id']}] effective duration is below the empirical minimum render duration -- skipped")
             continue
-        out = os.path.join(tmp, f"muxed_{beat['id']}.mov")
+        encoded_duration = Decimal(str(encoded_dur))
+        audio_timeline_start = audio_timeline_end
+        audio_timeline_end += encoded_duration
+        frame_end = int(
+            (audio_timeline_end * FPS).to_integral_value(rounding=ROUND_HALF_UP)
+        )
+        frames_this = max(1, frame_end - previous_frame_end)
+        previous_frame_end = frame_end
+        video_path = os.path.join(tmp, f"video_{beat['id']}.mp4")
         fc = (f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase,"
-              f"crop={W}:{H},setsar=1,fps={FPS},setpts=PTS-STARTPTS[v];"
-              "[1:a]asetpts=PTS-STARTPTS[a]")
-        ff(["-i", clip, "-i", audio_path, "-filter_complex", fc, "-map", "[v]", "-map", "[a]",
-            "-t", f"{encoded_dur:.2f}", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "pcm_s16le", out])
-        muxed.append(out)
+              f"crop={W}:{H},setsar=1,fps={FPS},setpts=PTS-STARTPTS[v]")
+        ff(["-i", clip, "-filter_complex", fc, "-map", "[v]", "-frames:v", str(frames_this),
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-an", video_path])
+        video_segments.append(video_path)
+        audio_segments.append(audio_path)
         effective_beat = dict(beat)
         effective_beat["start"] = float(source_start)
-        effective_beat["end"] = float(Decimal(source_start) + Decimal(str(encoded_dur)))
-        edit_spans.append({"beat": effective_beat, "output_start": output_start, "dur": encoded_dur})
-        output_start += encoded_dur
-        print(f"[{beat['id']}] muxed ({encoded_dur:.2f}s)")
+        effective_beat["end"] = float(Decimal(source_start) + encoded_duration)
+        edit_spans.append({
+            "beat": effective_beat,
+            "output_start": float(audio_timeline_start),
+            "dur": encoded_dur,
+        })
+        print(f"[{beat['id']}] rendered ({encoded_dur:.2f}s)")
 
-    if not muxed:
+    if not video_segments:
         raise SystemExit(
             "No beats had a generated clip or minimum render duration -- "
             "run aroll_clips.py and check beat durations."
         )
 
-    listf = os.path.join(tmp, "concat_list.txt")
-    with open(listf, "w") as f:
-        for m in muxed:
-            f.write(ffconcat_file_line(m))
+    video_list = os.path.join(tmp, "video_concat_list.txt")
+    with open(video_list, "w") as f:
+        for path in video_segments:
+            f.write(ffconcat_file_line(path))
+    audio_list = os.path.join(tmp, "audio_concat_list.txt")
+    with open(audio_list, "w") as f:
+        for path in audio_segments:
+            f.write(ffconcat_file_line(path))
+    video_concat = os.path.join(tmp, "aroll_video.mp4")
+    ff([
+        "-f", "concat", "-safe", "0", "-i", video_list,
+        "-map", "0:v:0", "-c:v", "copy", "-an", video_concat,
+    ])
+    audio_concat = os.path.join(tmp, "aroll_audio.wav")
+    ff([
+        "-f", "concat", "-safe", "0", "-i", audio_list,
+        "-map", "0:a:0", "-c:a", "pcm_s16le", audio_concat,
+    ])
     final = os.path.join(project_dir, "final.mp4")
-    total = sum(span["dur"] for span in edit_spans)
-    audio_filter = f"[0:a]atrim=duration={total:.2f},asetpts=PTS-STARTPTS[a]"
+    total_arg = format(audio_timeline_end, ".2f")
+    audio_filter = f"[1:a]atrim=duration={total_arg},asetpts=PTS-STARTPTS[a]"
     if caption_mode == "off":
         ff([
-            "-f", "concat", "-safe", "0", "-i", listf, "-t", f"{total:.2f}",
+            "-i", video_concat, "-i", audio_concat, "-t", total_arg,
             "-filter_complex", audio_filter, "-map", "0:v:0", "-map", "[a]",
             "-c:v", "copy", "-c:a", "aac", final,
         ])
-        print("FINAL:", final, f"({len(muxed)}/{len(doc['beats'])} beats)")
+        print("FINAL:", final, f"({len(video_segments)}/{len(doc['beats'])} beats)")
         return
 
-    concat_path = os.path.join(tmp, "aroll_concat.mov")
-    ff(["-f", "concat", "-safe", "0", "-i", listf, "-c", "copy", concat_path])
     transcript = _load_source_transcript(project_dir, doc)
     mapped_transcript = remap_source_transcript(transcript, edit_spans)
     ass_path = Path(project_dir) / "captions" / "captions.ass"
@@ -299,17 +324,17 @@ def run(project_dir):
         raise RuntimeError("A-roll caption transcript produced no caption events")
     ass_filter_path = ffmpeg_filter_path(str(ass_path))
     ff([
-        "-i", concat_path,
+        "-i", video_concat, "-i", audio_concat,
         "-filter_complex", (
             f"[0:v]subtitles=filename='{ass_filter_path}',setpts=PTS-STARTPTS[v];"
-            f"[0:a]atrim=duration={total:.2f},asetpts=PTS-STARTPTS[a]"
+            f"[1:a]atrim=duration={total_arg},asetpts=PTS-STARTPTS[a]"
         ),
         "-map", "[v]", "-map", "[a]",
-        "-t", f"{total:.2f}",
+        "-t", total_arg,
         "-c:v", "libx264", "-preset", "fast", "-crf", "18",
         "-pix_fmt", "yuv420p", "-c:a", "aac", final,
     ])
-    print("FINAL:", final, f"({len(muxed)}/{len(doc['beats'])} beats)")
+    print("FINAL:", final, f"({len(video_segments)}/{len(doc['beats'])} beats)")
 
 
 if __name__ == "__main__":
