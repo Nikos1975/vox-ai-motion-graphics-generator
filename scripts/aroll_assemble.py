@@ -9,6 +9,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from captions.transcription import load_cached_source_transcript
 from captions.subtitles import generate_ass
 from captions.subtitle_utils import ffmpeg_filter_path
 
@@ -126,18 +127,27 @@ def _caption_mode(doc):
     return mode
 
 
-def _load_source_transcript(project_dir):
-    transcript_path = Path(project_dir) / "captions" / "transcript.json"
-    try:
-        with transcript_path.open(encoding="utf-8") as handle:
-            transcript = json.load(handle)
-    except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+def _load_source_transcript(project_dir, doc):
+    transcript = load_cached_source_transcript(
+        project_dir,
+        doc["source_video"],
+        language=doc.get("language"),
+        model_size=doc.get("caption_whisper_model", "large-v3-turbo"),
+        compute_type=doc.get("caption_whisper_compute_type", "int8"),
+    )
+    if transcript is None:
         raise RuntimeError(
-            f"A-roll caption transcript is missing or invalid: {transcript_path}"
-        ) from exc
-    if not isinstance(transcript, dict) or not isinstance(transcript.get("segments"), list):
-        raise RuntimeError(f"A-roll caption transcript is missing or invalid: {transcript_path}")
+            "A-roll caption transcript is missing, stale, or invalid; "
+            "rerun asr_beats.py to regenerate it."
+        )
     return transcript
+
+
+def ffconcat_file_line(path):
+    """Return one ffconcat entry safe for Windows paths, spaces, and apostrophes."""
+    normalized = os.path.abspath(path).replace("\\", "/")
+    escaped = normalized.replace("'", "'\\''")
+    return f"file '{escaped}'\n"
 
 
 def run(project_dir):
@@ -166,15 +176,19 @@ def run(project_dir):
         if not d:
             print(f"[{beat['id']}] couldn't probe duration -- skipped")
             continue
+        encoded_dur = round(d, 2)
+        if encoded_dur <= 0:
+            print(f"[{beat['id']}] encoded duration rounded to zero -- skipped")
+            continue
         out = os.path.join(tmp, f"muxed_{beat['id']}.mp4")
         fc = (f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase,"
               f"crop={W}:{H},setsar=1,fps=24[v]")
         ff(["-i", clip, "-i", audio_path, "-filter_complex", fc, "-map", "[v]", "-map", "1:a:0",
-            "-t", f"{d:.2f}", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", out])
+            "-t", f"{encoded_dur:.2f}", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", out])
         muxed.append(out)
-        edit_spans.append({"beat": beat, "output_start": output_start, "dur": d})
-        output_start += d
-        print(f"[{beat['id']}] muxed ({d:.2f}s)")
+        edit_spans.append({"beat": beat, "output_start": output_start, "dur": encoded_dur})
+        output_start += encoded_dur
+        print(f"[{beat['id']}] muxed ({encoded_dur:.2f}s)")
 
     if not muxed:
         raise SystemExit("No beats had a generated clip -- run aroll_clips.py first")
@@ -182,7 +196,7 @@ def run(project_dir):
     listf = os.path.join(tmp, "concat_list.txt")
     with open(listf, "w") as f:
         for m in muxed:
-            f.write(f"file '{os.path.abspath(m)}'\n")
+            f.write(ffconcat_file_line(m))
     final = os.path.join(project_dir, "final.mp4")
     if caption_mode == "off":
         ff(["-f", "concat", "-safe", "0", "-i", listf, "-c", "copy", final])
@@ -191,7 +205,7 @@ def run(project_dir):
 
     concat_path = os.path.join(tmp, "aroll_concat.mp4")
     ff(["-f", "concat", "-safe", "0", "-i", listf, "-c", "copy", concat_path])
-    transcript = _load_source_transcript(project_dir)
+    transcript = _load_source_transcript(project_dir, doc)
     mapped_transcript = remap_source_transcript(transcript, edit_spans)
     ass_path = Path(project_dir) / "captions" / "captions.ass"
     created = generate_ass(

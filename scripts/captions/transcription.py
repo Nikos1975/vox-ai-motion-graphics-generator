@@ -214,6 +214,46 @@ def _read_cached_transcript(
     return None
 
 
+def _source_transcript_metadata(
+    source: Path,
+    *,
+    language: str | None,
+    model_size: str,
+    compute_type: str,
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "source_fingerprint": _sha256_file(source),
+        "model": model_size,
+        "requested_language": language,
+        "compute_type": compute_type,
+    }
+
+
+def load_cached_source_transcript(
+    project_dir: str | Path,
+    source_path: str | Path,
+    *,
+    language: str | None = None,
+    model_size: str = "large-v3-turbo",
+    compute_type: str = "int8",
+) -> dict[str, Any] | None:
+    """Read a valid canonical A-roll source transcript without transcribing."""
+    project = Path(project_dir)
+    source = Path(source_path)
+    if not source.is_file():
+        return None
+    metadata = _source_transcript_metadata(
+        source,
+        language=language,
+        model_size=model_size,
+        compute_type=compute_type,
+    )
+    return _read_cached_transcript(
+        project / "captions" / "transcript.json", metadata, require_words=True
+    )
+
+
 def build_source_transcript(
     project_dir: str | Path,
     source_path: str | Path,
@@ -228,13 +268,12 @@ def build_source_transcript(
     if not source.is_file():
         raise FileNotFoundError(f"A-roll source media not found: {source}")
     transcript_path = project / "captions" / "transcript.json"
-    metadata = {
-        "schema_version": 1,
-        "source_fingerprint": _sha256_file(source),
-        "model": model_size,
-        "requested_language": language,
-        "compute_type": compute_type,
-    }
+    metadata = _source_transcript_metadata(
+        source,
+        language=language,
+        model_size=model_size,
+        compute_type=compute_type,
+    )
     cached = _read_cached_transcript(transcript_path, metadata, require_words=True)
     if cached is not None:
         return cached

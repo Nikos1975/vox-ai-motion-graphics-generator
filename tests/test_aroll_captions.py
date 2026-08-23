@@ -1,3 +1,4 @@
+import hashlib
 import json
 import math
 import sys
@@ -452,7 +453,11 @@ class ArollAssemblyTests(unittest.TestCase):
         doc = {
             "mode": "aroll",
             "source_video": str(source),
+            "language": "en",
             "aspect": "9:16",
+            "caption_whisper_model": "large-v3-turbo",
+            "caption_whisper_device": "cpu",
+            "caption_whisper_compute_type": "int8",
             "beats": [{
                 "id": 1, "start": 1.0, "end": 2.0, "dur": 1.0,
                 "narration": "hello", "clip_path": str(clip),
@@ -465,14 +470,24 @@ class ArollAssemblyTests(unittest.TestCase):
         (project / "beats.json").write_text(json.dumps(doc), encoding="utf-8")
         return project
 
-    def write_transcript(self, project, words=None):
+    def write_transcript(self, project, words=None, **overrides):
         caption_dir = project / "captions"
-        caption_dir.mkdir()
-        (caption_dir / "transcript.json").write_text(json.dumps({
+        caption_dir.mkdir(exist_ok=True)
+        doc = json.loads((project / "beats.json").read_text(encoding="utf-8"))
+        transcript = {
+            "schema_version": 1,
+            "source_fingerprint": hashlib.sha256(
+                Path(doc["source_video"]).read_bytes()
+            ).hexdigest(),
+            "model": doc["caption_whisper_model"],
+            "requested_language": doc["language"],
+            "compute_type": doc["caption_whisper_compute_type"],
             "language": "en", "segments": [{"words": words or [
                 {"word": "hello", "start": 1.1, "end": 1.5},
             ]}],
-        }), encoding="utf-8")
+        }
+        transcript.update(overrides)
+        (caption_dir / "transcript.json").write_text(json.dumps(transcript), encoding="utf-8")
 
     def run_captured(self, project, generate_result=True, durations=None):
         calls = []
@@ -540,6 +555,12 @@ class ArollAssemblyTests(unittest.TestCase):
         self.assertIn(expected, filter_graph)
         self.assertEqual(final_call[final_call.index("-t") + 1], "1.00")
 
+    def test_ffconcat_line_normalizes_windows_paths_and_escapes_apostrophes(self):
+        self.assertEqual(
+            aroll_assemble.ffconcat_file_line(r"C:\caption project's\muxed 1.mp4"),
+            "file 'C:/caption project'\\''s/muxed 1.mp4'\n",
+        )
+
     def test_word_mode_passes_caption_style_and_defaults_position(self):
         with tempfile.TemporaryDirectory() as tmp:
             project = self.make_project(tmp, "word", caption_style="paper")
@@ -572,6 +593,28 @@ class ArollAssemblyTests(unittest.TestCase):
         self.assertEqual(mapped["segments"][0]["beat_id"], 2)
         self.assertAlmostEqual(mapped["segments"][0]["words"][0]["start"], 0.1)
 
+    def test_encoded_duration_is_used_for_mux_spans_and_final_total(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = self.make_project(tmp, "word")
+            doc_path = project / "beats.json"
+            doc = json.loads(doc_path.read_text(encoding="utf-8"))
+            doc["beats"].append({
+                "id": 2, "start": 3.0, "end": 4.0, "dur": 1.0,
+                "narration": "second", "clip_path": doc["beats"][0]["clip_path"],
+            })
+            doc_path.write_text(json.dumps(doc), encoding="utf-8")
+            self.write_transcript(project, [
+                {"word": "first", "start": 1.1, "end": 1.5},
+                {"word": "second", "start": 3.1, "end": 3.5},
+            ])
+            calls, generate = self.run_captured(project, durations=[1.004] * 4)
+        mux_calls = [call for call in calls if "1:a:0" in call]
+        self.assertEqual([call[call.index("-t") + 1] for call in mux_calls], ["1.00", "1.00"])
+        self.assertEqual(
+            [segment["start"] for segment in generate.call_args.args[0]["segments"]], [0.0, 1.0]
+        )
+        self.assertEqual(calls[-1][calls[-1].index("-t") + 1], "2.00")
+
     def test_unknown_caption_mode_fails(self):
         with self.assertRaisesRegex(ValueError, "word, off"):
             aroll_assemble._caption_mode({"caption_mode": "static"})
@@ -581,12 +624,32 @@ class ArollAssemblyTests(unittest.TestCase):
     def test_word_mode_missing_or_invalid_transcript_fails_clearly(self):
         with tempfile.TemporaryDirectory() as tmp:
             project = self.make_project(tmp, "word")
-            with self.assertRaisesRegex(RuntimeError, "A-roll caption transcript"):
+            with self.assertRaisesRegex(RuntimeError, "rerun asr_beats.py"):
                 self.run_captured(project)
             (project / "captions").mkdir()
             (project / "captions" / "transcript.json").write_text("{broken", encoding="utf-8")
-            with self.assertRaisesRegex(RuntimeError, "A-roll caption transcript"):
+            with self.assertRaisesRegex(RuntimeError, "rerun asr_beats.py"):
                 self.run_captured(project)
+
+    def test_word_mode_rejects_stale_or_noncanonical_source_cache_without_asr(self):
+        cases = {
+            "source": lambda project, doc: Path(doc["source_video"]).write_bytes(b"changed"),
+            "model": lambda project, doc: self.write_transcript(project, model="small"),
+            "language": lambda project, doc: self.write_transcript(project, requested_language="el"),
+            "compute": lambda project, doc: self.write_transcript(project, compute_type="default"),
+            "schema": lambda project, doc: self.write_transcript(project, schema_version=2),
+            "words": lambda project, doc: self.write_transcript(project, segments=[{"words": [{"text": "bad"}]}]),
+        }
+        for name, mutate in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                project = self.make_project(tmp, "word")
+                self.write_transcript(project)
+                doc = json.loads((project / "beats.json").read_text(encoding="utf-8"))
+                mutate(project, doc)
+                with self.assertRaisesRegex(RuntimeError, "rerun asr_beats.py"):
+                    self.run_captured(project)
+        self.assertFalse(hasattr(aroll_assemble, "build_source_transcript"))
+        self.assertFalse(hasattr(aroll_assemble, "_transcribe_with_model"))
 
     def test_word_mode_requires_rendered_ass_events(self):
         with tempfile.TemporaryDirectory() as tmp:
