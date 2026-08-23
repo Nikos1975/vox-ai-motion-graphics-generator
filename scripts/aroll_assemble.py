@@ -20,6 +20,8 @@ from captions.subtitle_utils import ffmpeg_filter_path
 
 RES = {"16:9": (1920, 1080), "9:16": (1080, 1920), "1:1": (1080, 1080),
        "4:3": (1440, 1080), "3:4": (1080, 1440)}
+FPS = 24
+MIN_FRAME_DUR = math.ceil(100 / FPS) / 100
 
 
 def ff(args):
@@ -208,6 +210,12 @@ def run(project_dir):
         if source_cut_dur <= 0:
             print(f"[{beat['id']}] source cut duration rounded to zero -- skipped")
             continue
+        if source_cut_dur < MIN_FRAME_DUR:
+            print(
+                f"[{beat['id']}] source cut is shorter than one {FPS} fps frame "
+                f"({MIN_FRAME_DUR:.2f}s) -- skipped"
+            )
+            continue
         audio_path = os.path.join(tmp, f"audio_{beat['id']}.m4a")
         ff(["-ss", str(source_start), "-i", src, "-t", f"{source_cut_dur:.2f}",
             "-vn", "-c:a", "aac", audio_path])
@@ -222,7 +230,7 @@ def run(project_dir):
             continue
         out = os.path.join(tmp, f"muxed_{beat['id']}.mp4")
         fc = (f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase,"
-              f"crop={W}:{H},setsar=1,fps=24[v]")
+              f"crop={W}:{H},setsar=1,fps={FPS}[v]")
         ff(["-i", clip, "-i", audio_path, "-filter_complex", fc, "-map", "[v]", "-map", "1:a:0",
             "-t", f"{encoded_dur:.2f}", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "copy", out])
         muxed.append(out)
@@ -231,7 +239,10 @@ def run(project_dir):
         print(f"[{beat['id']}] muxed ({encoded_dur:.2f}s)")
 
     if not muxed:
-        raise SystemExit("No beats had a generated clip -- run aroll_clips.py first")
+        raise SystemExit(
+            "No beats had a generated clip or renderable duration -- "
+            "run aroll_clips.py and check beat durations."
+        )
 
     listf = os.path.join(tmp, "concat_list.txt")
     with open(listf, "w") as f:

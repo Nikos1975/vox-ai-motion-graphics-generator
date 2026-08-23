@@ -784,22 +784,31 @@ class ArollAssemblyTests(unittest.TestCase):
         self.assertEqual(extraction_call[extraction_call.index("-t") + 1], "1.00")
         self.assertEqual(mux_call[mux_call.index("-t") + 1], "1.00")
 
-    def test_exact_centisecond_source_bounds_keep_a_hundredth_second_cut(self):
+    def test_sub_frame_source_cut_is_skipped_before_ffmpeg(self):
         with tempfile.TemporaryDirectory() as tmp:
             project = self.make_project(tmp, "off")
             doc_path = project / "beats.json"
             doc = json.loads(doc_path.read_text(encoding="utf-8"))
             doc["beats"][0].update(start=0.10, end=0.11, dur=0.01)
             doc_path.write_text(json.dumps(doc), encoding="utf-8")
-            try:
-                calls, _generate = self.run_captured(project, durations=[2.0, 2.0])
-            except SystemExit as exc:
-                self.fail(f"centisecond source cut was incorrectly skipped: {exc}")
+            with patch.object(aroll_assemble, "ff") as ff:
+                with self.assertRaisesRegex(SystemExit, "renderable duration"):
+                    aroll_assemble.run(str(project))
+        ff.assert_not_called()
+
+    def test_exact_centisecond_source_bounds_keep_a_representable_cut(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = self.make_project(tmp, "off")
+            doc_path = project / "beats.json"
+            doc = json.loads(doc_path.read_text(encoding="utf-8"))
+            doc["beats"][0].update(start=0.10, end=0.15, dur=0.05)
+            doc_path.write_text(json.dumps(doc), encoding="utf-8")
+            calls, _generate = self.run_captured(project, durations=[2.0, 2.0])
         extraction_call = next(call for call in calls if "-vn" in call)
         mux_call = next(call for call in calls if "1:a:0" in call)
         self.assertEqual(extraction_call[extraction_call.index("-ss") + 1], "0.1")
-        self.assertEqual(extraction_call[extraction_call.index("-t") + 1], "0.01")
-        self.assertEqual(mux_call[mux_call.index("-t") + 1], "0.01")
+        self.assertEqual(extraction_call[extraction_call.index("-t") + 1], "0.05")
+        self.assertEqual(mux_call[mux_call.index("-t") + 1], "0.05")
 
     def test_unprobeable_clip_or_audio_skips_the_beat(self):
         with tempfile.TemporaryDirectory() as tmp:
