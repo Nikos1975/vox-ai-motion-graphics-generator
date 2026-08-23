@@ -7,7 +7,7 @@ import math
 import os
 import subprocess
 import sys
-from decimal import Decimal, InvalidOperation, ROUND_DOWN
+from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_HALF_UP
 from pathlib import Path
 
 from captions.transcription import (
@@ -23,6 +23,7 @@ RES = {"16:9": (1920, 1080), "9:16": (1080, 1920), "1:1": (1080, 1080),
 FPS = 24
 # Empirical 24 fps/AAC timestamp floor: 0.10-0.50s cuts exceed the 5ms bound; 1.00s does not.
 MIN_RENDER_DUR = 1.0
+CENTISECOND = Decimal("0.01")
 
 
 def ff(args):
@@ -50,24 +51,33 @@ def _encoded_cut_duration(value):
     duration = _finite_number(value)
     if duration is None or duration <= 0:
         return 0.0
-    return float(Decimal(str(duration)).quantize(Decimal("0.01"), rounding=ROUND_DOWN))
+    return float(Decimal(str(duration)).quantize(CENTISECOND, rounding=ROUND_DOWN))
+
+
+def _timeline_decimal(value):
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+    if not number.is_finite():
+        return None
+    return number.quantize(CENTISECOND, rounding=ROUND_HALF_UP)
 
 
 def _source_cut(start, end, requested_duration):
-    try:
-        source_start = Decimal(str(start))
-        source_end = Decimal(str(end))
-    except (InvalidOperation, ValueError):
-        return None, 0.0
+    source_start = _timeline_decimal(start)
+    source_end = _timeline_decimal(end)
+    requested = _timeline_decimal(requested_duration)
     if (
-        not source_start.is_finite()
-        or not source_end.is_finite()
+        source_start is None
+        or source_end is None
+        or requested is None
         or source_start < 0
         or source_end <= source_start
     ):
         return None, 0.0
     return format(source_start, "f"), _encoded_cut_duration(
-        min(Decimal(str(requested_duration)), source_end - source_start)
+        min(requested, source_end - source_start)
     )
 
 
@@ -201,7 +211,8 @@ def run(project_dir):
         if not clip or not os.path.exists(clip):
             print(f"[{beat['id']}] no generated clip -- skipped")
             continue
-        requested_dur = _encoded_cut_duration(beat.get("dur"))
+        requested = _timeline_decimal(beat.get("dur"))
+        requested_dur = float(requested) if requested is not None and requested > 0 else 0.0
         source_start, source_cut_dur = _source_cut(
             beat.get("start"), beat.get("end"), requested_dur
         )
@@ -224,9 +235,9 @@ def run(project_dir):
         if _encoded_cut_duration(min(source_cut_dur, vd)) < MIN_RENDER_DUR:
             print(f"[{beat['id']}] clip is below the empirical minimum render duration -- skipped")
             continue
-        audio_path = os.path.join(tmp, f"audio_{beat['id']}.m4a")
+        audio_path = os.path.join(tmp, f"audio_{beat['id']}.wav")
         ff(["-ss", str(source_start), "-i", src, "-t", f"{source_cut_dur:.2f}",
-            "-vn", "-c:a", "aac", audio_path])
+            "-vn", "-c:a", "pcm_s16le", audio_path])
         ad = _finite_number(probe_dur(audio_path))
         if ad is None or ad <= 0:
             print(f"[{beat['id']}] couldn't probe audio duration -- skipped")
@@ -235,13 +246,17 @@ def run(project_dir):
         if encoded_dur < MIN_RENDER_DUR:
             print(f"[{beat['id']}] effective duration is below the empirical minimum render duration -- skipped")
             continue
-        out = os.path.join(tmp, f"muxed_{beat['id']}.mp4")
+        out = os.path.join(tmp, f"muxed_{beat['id']}.mov")
         fc = (f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase,"
-              f"crop={W}:{H},setsar=1,fps={FPS}[v]")
-        ff(["-i", clip, "-i", audio_path, "-filter_complex", fc, "-map", "[v]", "-map", "1:a:0",
-            "-t", f"{encoded_dur:.2f}", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "copy", out])
+              f"crop={W}:{H},setsar=1,fps={FPS},setpts=PTS-STARTPTS[v];"
+              "[1:a]asetpts=PTS-STARTPTS[a]")
+        ff(["-i", clip, "-i", audio_path, "-filter_complex", fc, "-map", "[v]", "-map", "[a]",
+            "-t", f"{encoded_dur:.2f}", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "pcm_s16le", out])
         muxed.append(out)
-        edit_spans.append({"beat": beat, "output_start": output_start, "dur": encoded_dur})
+        effective_beat = dict(beat)
+        effective_beat["start"] = float(source_start)
+        effective_beat["end"] = float(Decimal(source_start) + Decimal(str(encoded_dur)))
+        edit_spans.append({"beat": effective_beat, "output_start": output_start, "dur": encoded_dur})
         output_start += encoded_dur
         print(f"[{beat['id']}] muxed ({encoded_dur:.2f}s)")
 
@@ -257,16 +272,17 @@ def run(project_dir):
             f.write(ffconcat_file_line(m))
     final = os.path.join(project_dir, "final.mp4")
     total = sum(span["dur"] for span in edit_spans)
+    audio_filter = f"[0:a]atrim=duration={total:.2f},asetpts=PTS-STARTPTS[a]"
     if caption_mode == "off":
         ff([
             "-f", "concat", "-safe", "0", "-i", listf, "-t", f"{total:.2f}",
-            "-map", "0:v:0", "-map", "0:a:0",
-            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "copy", final,
+            "-filter_complex", audio_filter, "-map", "0:v:0", "-map", "[a]",
+            "-c:v", "copy", "-c:a", "aac", final,
         ])
         print("FINAL:", final, f"({len(muxed)}/{len(doc['beats'])} beats)")
         return
 
-    concat_path = os.path.join(tmp, "aroll_concat.mp4")
+    concat_path = os.path.join(tmp, "aroll_concat.mov")
     ff(["-f", "concat", "-safe", "0", "-i", listf, "-c", "copy", concat_path])
     transcript = _load_source_transcript(project_dir, doc)
     mapped_transcript = remap_source_transcript(transcript, edit_spans)
@@ -284,11 +300,14 @@ def run(project_dir):
     ass_filter_path = ffmpeg_filter_path(str(ass_path))
     ff([
         "-i", concat_path,
-        "-filter_complex", f"[0:v]subtitles=filename='{ass_filter_path}'[v]",
-        "-map", "[v]", "-map", "0:a:0",
+        "-filter_complex", (
+            f"[0:v]subtitles=filename='{ass_filter_path}',setpts=PTS-STARTPTS[v];"
+            f"[0:a]atrim=duration={total:.2f},asetpts=PTS-STARTPTS[a]"
+        ),
+        "-map", "[v]", "-map", "[a]",
         "-t", f"{total:.2f}",
         "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-        "-pix_fmt", "yuv420p", "-c:a", "copy", final,
+        "-pix_fmt", "yuv420p", "-c:a", "aac", final,
     ])
     print("FINAL:", final, f"({len(muxed)}/{len(doc['beats'])} beats)")
 

@@ -658,6 +658,22 @@ ff([
 
 This filter changes video only. Do not add silence, a second audio input, a mix, a watermark, or another transcription call.
 
+### Timing refinement implemented after this plan
+
+For robust source-cut and container timing, assembly now independently rounds
+parsed A-roll `start`, `end`, and requested duration to centiseconds with
+round-half-up before calculating the source interval, then safely floors the
+encoded duration. It rejects effective cuts shorter than one second; that is a
+narrow 24-fps/AAC rendering constraint, while normal ASR beats remain at least
+two seconds. Accepted cuts use lossless PCM WAV audio in reset-PTS PCM MOV
+intermediates. Finalization concatenates those intermediates, AAC-encodes the
+single original-speech stream once, and stream-copies the `off` video; `word`
+re-encodes only its subtitle-filtered video. No silence, mix, or duplicate
+speech stream is introduced. Probe assertions allow at most one 24-fps frame
+plus one 1024-sample AAC packet (about 62.5 ms at 48 kHz) for apparent
+container/stream duration, require starts near zero, and reject accumulated
+per-beat drift.
+
 - [ ] **Step 4: Run all focused A-roll tests GREEN**
 
 Run:

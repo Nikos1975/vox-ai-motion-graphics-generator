@@ -611,7 +611,8 @@ class ArollAssemblyTests(unittest.TestCase):
             calls, generate = self.run_captured(project)
             final = str(project / "final.mp4")
         self.assertEqual(generate.call_count, 0)
-        self.assertEqual(calls[-1][-2:], ["copy", final])
+        self.assertEqual(calls[-1][-2:], ["aac", final])
+        self.assertEqual(calls[-1][calls[-1].index("-c:v") + 1], "copy")
 
     def test_explicit_off_skips_transcript_and_ass(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -631,10 +632,11 @@ class ArollAssemblyTests(unittest.TestCase):
         self.assertAlmostEqual(mapped["segments"][0]["words"][0]["start"], 0.1)
         self.assertFalse(hasattr(aroll_assemble, "build_source_transcript"))
         self.assertFalse(hasattr(aroll_assemble, "_transcribe_with_model"))
-        mux_call = next(call for call in calls if "1:a:0" in call)
-        self.assertEqual(mux_call.count("1:a:0"), 1)
+        mux_call = next(call for call in calls if "pcm_s16le" in call and "[v]" in call)
+        self.assertEqual(mux_call.count("-map"), 2)
+        self.assertIn("[a]", mux_call)
         final_call = calls[-1]
-        self.assertEqual(final_call.count("0:a:0"), 1)
+        self.assertIn("[a]", final_call)
         self.assertEqual(final_call.count("-map"), 2)
 
     def test_word_mode_uses_windows_safe_ass_filter_and_total_duration(self):
@@ -701,7 +703,7 @@ class ArollAssemblyTests(unittest.TestCase):
                 {"word": "second", "start": 3.1, "end": 3.5},
             ])
             calls, generate = self.run_captured(project, durations=[1.004] * 4)
-        mux_calls = [call for call in calls if "1:a:0" in call]
+        mux_calls = [call for call in calls if "pcm_s16le" in call and "[v]" in call]
         self.assertEqual([call[call.index("-t") + 1] for call in mux_calls], ["1.00", "1.00"])
         self.assertEqual(
             [segment["start"] for segment in generate.call_args.args[0]["segments"]], [0.0, 1.0]
@@ -725,9 +727,9 @@ class ArollAssemblyTests(unittest.TestCase):
             calls, generate = self.run_captured(project, durations=[2.0] * 4)
 
         extraction_calls = [call for call in calls if "-vn" in call]
-        mux_calls = [call for call in calls if "1:a:0" in call]
+        mux_calls = [call for call in calls if "pcm_s16le" in call and "[v]" in call]
         self.assertEqual([call[call.index("-t") + 1] for call in extraction_calls], ["1.00", "1.00"])
-        self.assertTrue(all(call[-1].endswith(".m4a") for call in extraction_calls))
+        self.assertTrue(all(call[-1].endswith(".wav") for call in extraction_calls))
         self.assertEqual([call[call.index("-t") + 1] for call in mux_calls], ["1.00", "1.00"])
         self.assertEqual(
             [segment["start"] for segment in generate.call_args.args[0]["segments"]], [0.0, 1.0]
@@ -751,13 +753,16 @@ class ArollAssemblyTests(unittest.TestCase):
             doc_path.write_text(json.dumps(doc), encoding="utf-8")
             calls, _generate = self.run_captured(project, durations=[2.0, 2.0])
         extraction_call = next(call for call in calls if "-vn" in call)
-        mux_call = next(call for call in calls if "1:a:0" in call)
+        mux_call = next(call for call in calls if "pcm_s16le" in call and "[v]" in call)
         self.assertEqual(extraction_call[extraction_call.index("-t") + 1], "1.29")
         self.assertEqual(mux_call[mux_call.index("-t") + 1], "1.29")
         self.assertEqual(calls[-1][calls[-1].index("-t") + 1], "1.29")
 
     def test_source_cut_uses_exact_start_and_does_not_cross_beat_end(self):
-        self.assertEqual(aroll_assemble._source_cut(1.006, 2.005, 1.0), ("1.006", 0.99))
+        self.assertEqual(
+            aroll_assemble._source_cut(1.3900000000000001, 2.68, 1.29), ("1.39", 1.29)
+        )
+        self.assertEqual(aroll_assemble._source_cut(1.006, 2.005, 1.0), ("1.01", 1.0))
         with tempfile.TemporaryDirectory() as tmp:
             project = self.make_project(tmp, "off")
             doc_path = project / "beats.json"
@@ -766,10 +771,24 @@ class ArollAssemblyTests(unittest.TestCase):
             doc_path.write_text(json.dumps(doc), encoding="utf-8")
             calls, _generate = self.run_captured(project, durations=[2.0, 2.0])
         extraction_call = next(call for call in calls if "-vn" in call)
-        mux_call = next(call for call in calls if "1:a:0" in call)
-        self.assertEqual(extraction_call[extraction_call.index("-ss") + 1], "1.006")
+        mux_call = next(call for call in calls if "pcm_s16le" in call and "[v]" in call)
+        self.assertEqual(extraction_call[extraction_call.index("-ss") + 1], "1.01")
         self.assertEqual(extraction_call[extraction_call.index("-t") + 1], "1.00")
         self.assertEqual(mux_call[mux_call.index("-t") + 1], "1.00")
+
+    def test_caption_remap_uses_the_rounded_source_cut_boundary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = self.make_project(tmp, "word")
+            self.write_transcript(project, words=[
+                {"word": "before-cut", "start": 1.006, "end": 1.009},
+            ])
+            doc_path = project / "beats.json"
+            doc = json.loads(doc_path.read_text(encoding="utf-8"))
+            doc["beats"][0].update({"start": 1.006, "end": 2.005, "dur": 1.0})
+            doc_path.write_text(json.dumps(doc), encoding="utf-8")
+            _calls, generate = self.run_captured(project, durations=[2.0, 2.0])
+
+        self.assertEqual(generate.call_args.args[0]["segments"][0]["words"], [])
 
     def test_exact_centisecond_source_bounds_keep_a_one_second_cut(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -780,7 +799,7 @@ class ArollAssemblyTests(unittest.TestCase):
             doc_path.write_text(json.dumps(doc), encoding="utf-8")
             calls, _generate = self.run_captured(project, durations=[2.0, 2.0])
         extraction_call = next(call for call in calls if "-vn" in call)
-        mux_call = next(call for call in calls if "1:a:0" in call)
+        mux_call = next(call for call in calls if "pcm_s16le" in call and "[v]" in call)
         self.assertEqual(extraction_call[extraction_call.index("-ss") + 1], "1.01")
         self.assertEqual(extraction_call[extraction_call.index("-t") + 1], "1.00")
         self.assertEqual(mux_call[mux_call.index("-t") + 1], "1.00")
@@ -833,7 +852,7 @@ class ArollAssemblyTests(unittest.TestCase):
         self.assertNotIn("1:a:0", calls[0])
 
     def test_exact_centisecond_source_bounds_are_not_lost_before_renderability_check(self):
-        self.assertEqual(aroll_assemble._source_cut(0.10, 0.15, 0.05), ("0.1", 0.05))
+        self.assertEqual(aroll_assemble._source_cut(0.10, 0.15, 0.05), ("0.10", 0.05))
         with tempfile.TemporaryDirectory() as tmp:
             project = self.make_project(tmp, "off")
             doc_path = project / "beats.json"
@@ -852,67 +871,84 @@ class ArollAssemblyTests(unittest.TestCase):
                 self.run_captured(project, durations=[2.0, 0.0])
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg and ffprobe required")
-    def test_real_ffmpeg_final_duration_is_bounded_in_off_and_word_modes(self):
-        for caption_mode in ("off", "word"):
-            with self.subTest(caption_mode=caption_mode), tempfile.TemporaryDirectory() as tmp:
-                project = Path(tmp) / caption_mode
-                project.mkdir()
-                source = project / "source.mp4"
-                subprocess.run([
-                    "ffmpeg", "-y", "-loglevel", "error",
-                    "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=24",
-                    "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
-                    "-t", "2", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(source),
-                ], check=True)
-                doc = {
-                    "mode": "aroll",
-                    "source_video": str(source),
-                    "language": "en",
-                    "aspect": "tiny",
-                    "caption_mode": caption_mode,
-                    "beats": [{
-                        "id": 1, "start": 0.1, "end": 1.1, "dur": 1.0,
-                        "clip_path": str(source),
-                    }],
-                }
-                (project / "beats.json").write_text(json.dumps(doc), encoding="utf-8")
-                if caption_mode == "word":
-                    caption_dir = project / "captions"
-                    caption_dir.mkdir()
-                    (caption_dir / "transcript.json").write_text(json.dumps({
-                        "schema_version": 1,
-                        "source_fingerprint": hashlib.sha256(source.read_bytes()).hexdigest(),
-                        "model": "small",
-                        "requested_language": "en",
-                        "compute_type": "int8",
+    def test_real_ffmpeg_nonround_and_multibeat_timelines_stay_within_media_quantum(self):
+        cases = ((1.01,), (1.29,), (2.03,), (1.01, 1.29, 2.03))
+        quantum = 1 / aroll_assemble.FPS + 1024 / 48000
+        for durations in cases:
+            for caption_mode in ("off", "word"):
+                with self.subTest(caption_mode=caption_mode, durations=durations), tempfile.TemporaryDirectory() as tmp:
+                    project = Path(tmp) / caption_mode
+                    project.mkdir()
+                    source = project / "source.mp4"
+                    subprocess.run([
+                        "ffmpeg", "-y", "-loglevel", "error",
+                        "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=24",
+                        "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+                        "-t", "10", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(source),
+                    ], check=True)
+                    start = 0.1
+                    beats = []
+                    segments = []
+                    for index, duration in enumerate(durations, start=1):
+                        end = start + duration
+                        beats.append({
+                            "id": index, "start": start, "end": end, "dur": duration,
+                            "clip_path": str(source),
+                        })
+                        word_end = min(end, start + 0.3)
+                        segments.append({
+                            "start": start, "end": word_end, "text": f"beat {index}",
+                            "words": [{"word": f"beat{index}", "start": start, "end": word_end}],
+                        })
+                        start = end + 0.1
+                    doc = {
+                        "mode": "aroll",
+                        "source_video": str(source),
                         "language": "en",
-                        "segments": [{
-                            "start": 0.1, "end": 0.9, "text": "test tone",
-                            "words": [
-                                {"word": "test", "start": 0.1, "end": 0.4},
-                                {"word": "tone", "start": 0.5, "end": 0.9},
-                            ],
-                        }],
-                    }), encoding="utf-8")
-                with patch.dict(aroll_assemble.RES, {"tiny": (64, 64)}):
-                    aroll_assemble.run(str(project))
-                final = project / "final.mp4"
-                # MP4 timestamps can retain a 128-sample (2.667 ms at 48 kHz) AAC tail.
-                # Five milliseconds bounds that container precision without masking ADTS inflation.
-                self.assertLessEqual(aroll_assemble.probe_dur(final), 1.005)
-                streams = json.loads(subprocess.run([
-                    "ffprobe", "-v", "error", "-show_entries", "stream=codec_type,duration",
-                    "-of", "json", str(final),
-                ], capture_output=True, text=True, check=True).stdout)["streams"]
-                audio_streams = [stream for stream in streams if stream["codec_type"] == "audio"]
-                self.assertEqual(len(audio_streams), 1)
-                self.assertGreater(float(audio_streams[0]["duration"]), 0.9)
-                volume = subprocess.run([
-                    "ffmpeg", "-v", "info", "-i", str(final), "-map", "0:a:0",
-                    "-af", "volumedetect", "-f", "null", "-",
-                ], capture_output=True, text=True, check=True).stderr
-                self.assertIn("max_volume:", volume)
-                self.assertNotIn("max_volume: -inf", volume)
+                        "aspect": "tiny",
+                        "caption_mode": caption_mode,
+                        "beats": beats,
+                    }
+                    (project / "beats.json").write_text(json.dumps(doc), encoding="utf-8")
+                    if caption_mode == "word":
+                        caption_dir = project / "captions"
+                        caption_dir.mkdir()
+                        (caption_dir / "transcript.json").write_text(json.dumps({
+                            "schema_version": 1,
+                            "source_fingerprint": hashlib.sha256(source.read_bytes()).hexdigest(),
+                            "model": "small",
+                            "requested_language": "en",
+                            "compute_type": "int8",
+                            "language": "en",
+                            "segments": segments,
+                        }), encoding="utf-8")
+                    with patch.dict(aroll_assemble.RES, {"tiny": (64, 64)}):
+                        aroll_assemble.run(str(project))
+                    final = project / "final.mp4"
+                    expected = sum(durations)
+                    streams = json.loads(subprocess.run([
+                        "ffprobe", "-v", "error",
+                        "-show_entries", "stream=codec_type,start_time,duration",
+                        "-of", "json", str(final),
+                    ], capture_output=True, text=True, check=True).stdout)["streams"]
+                    video_streams = [stream for stream in streams if stream["codec_type"] == "video"]
+                    audio_streams = [stream for stream in streams if stream["codec_type"] == "audio"]
+                    self.assertEqual(len(video_streams), 1)
+                    self.assertEqual(len(audio_streams), 1)
+                    self.assertLessEqual(abs(aroll_assemble.probe_dur(final) - expected), quantum)
+                    for stream in [*video_streams, *audio_streams]:
+                        self.assertLessEqual(abs(float(stream["start_time"])), 0.001)
+                        self.assertLessEqual(abs(float(stream["duration"]) - expected), quantum)
+                    volume = subprocess.run([
+                        "ffmpeg", "-v", "info", "-i", str(final), "-map", "0:a:0",
+                        "-af", "volumedetect", "-f", "null", "-",
+                    ], capture_output=True, text=True, check=True).stderr
+                    self.assertIn("max_volume:", volume)
+                    self.assertNotIn("max_volume: -inf", volume)
+                    if caption_mode == "word":
+                        ass = (project / "captions" / "captions.ass").read_text(encoding="utf-8")
+                        for index in range(1, len(durations) + 1):
+                            self.assertIn(f"beat{index}", ass)
 
     def test_unknown_caption_mode_fails(self):
         with self.assertRaisesRegex(ValueError, "word, off"):

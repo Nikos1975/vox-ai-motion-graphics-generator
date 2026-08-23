@@ -102,6 +102,24 @@ assembly, A-roll reads that same cached transcript and remaps its source word
 timestamps onto the final edit timeline. It does not transcribe again or invent
 word timings. The final A-roll retains the original source-audio segments.
 
+### A-roll edit timing
+
+Assembly normalizes each A-roll beat's source `start`, `end`, and requested
+duration independently to centiseconds (round-half-up), then safely floors the
+encoded cut so it never reaches past that source interval. To make short
+24-fps/AAC outputs reliable, assembly rejects an effective cut below one second;
+this is only an A-roll rendering floor (normal ASR beats are at least two
+seconds), not a transcription rule.
+
+Each accepted source cut is extracted as lossless PCM, paired with its reset-PTS
+video in a PCM MOV intermediate, and those intermediates are concatenated. The
+final has one original-speech AAC encode: `off` stream-copies the concatenated
+video, while `word` encodes only the video needed to burn subtitles. Neither
+mode mixes, pads, or duplicates speech. Container, audio, and video timestamps
+can differ from the requested edit timeline by at most one 24-fps frame plus one
+AAC packet (1024 samples, about 62.5 ms at 48 kHz); stream starts are reset near
+zero and that tolerance does not accumulate per beat.
+
 ### A-roll cache identity
 
 Unlike the B-roll/C-roll timeline fingerprint, the A-roll cache is keyed by the
