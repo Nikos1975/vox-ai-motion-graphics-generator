@@ -680,7 +680,7 @@ class ArollAssemblyTests(unittest.TestCase):
                 {"word": "discarded", "start": 1.1, "end": 1.5},
                 {"word": "kept", "start": 3.1, "end": 3.5},
             ])
-            _calls, generate = self.run_captured(project, durations=[0.0, 0.0, 1.0, 1.0])
+            _calls, generate = self.run_captured(project, durations=[0.0, 1.0, 1.0])
         mapped = generate.call_args.args[0]
         self.assertEqual(len(mapped["segments"]), 1)
         self.assertEqual(mapped["segments"][0]["beat_id"], 2)
@@ -808,6 +808,29 @@ class ArollAssemblyTests(unittest.TestCase):
                 with self.assertRaisesRegex(SystemExit, "minimum render duration"):
                     aroll_assemble.run(str(project))
         ff.assert_not_called()
+
+    def test_short_generated_clip_is_skipped_before_audio_extraction(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = self.make_project(tmp, "off")
+            with patch.object(aroll_assemble, "probe_dur", return_value=0.5), patch.object(
+                aroll_assemble, "ff"
+            ) as ff:
+                with self.assertRaisesRegex(SystemExit, "minimum render duration"):
+                    aroll_assemble.run(str(project))
+        ff.assert_not_called()
+
+    def test_short_extracted_audio_is_skipped_before_muxing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = self.make_project(tmp, "off")
+            calls = []
+            with patch.object(aroll_assemble, "probe_dur", side_effect=[2.0, 0.5]), patch.object(
+                aroll_assemble, "ff", side_effect=calls.append
+            ):
+                with self.assertRaisesRegex(SystemExit, "minimum render duration"):
+                    aroll_assemble.run(str(project))
+        self.assertEqual(len(calls), 1)
+        self.assertIn("-vn", calls[0])
+        self.assertNotIn("1:a:0", calls[0])
 
     def test_exact_centisecond_source_bounds_are_not_lost_before_renderability_check(self):
         self.assertEqual(aroll_assemble._source_cut(0.10, 0.15, 0.05), ("0.1", 0.05))

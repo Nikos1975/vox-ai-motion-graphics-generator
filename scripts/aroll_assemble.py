@@ -217,17 +217,23 @@ def run(project_dir):
                 f"({MIN_RENDER_DUR:.2f}s at {FPS} fps/AAC) -- skipped"
             )
             continue
+        vd = _finite_number(probe_dur(clip))
+        if vd is None or vd <= 0:
+            print(f"[{beat['id']}] couldn't probe clip duration -- skipped")
+            continue
+        if _encoded_cut_duration(min(source_cut_dur, vd)) < MIN_RENDER_DUR:
+            print(f"[{beat['id']}] clip is below the empirical minimum render duration -- skipped")
+            continue
         audio_path = os.path.join(tmp, f"audio_{beat['id']}.m4a")
         ff(["-ss", str(source_start), "-i", src, "-t", f"{source_cut_dur:.2f}",
             "-vn", "-c:a", "aac", audio_path])
-        vd = _finite_number(probe_dur(clip))
         ad = _finite_number(probe_dur(audio_path))
-        if vd is None or ad is None or vd <= 0 or ad <= 0:
-            print(f"[{beat['id']}] couldn't probe duration -- skipped")
+        if ad is None or ad <= 0:
+            print(f"[{beat['id']}] couldn't probe audio duration -- skipped")
             continue
         encoded_dur = _encoded_cut_duration(min(source_cut_dur, vd, ad))
-        if encoded_dur <= 0:
-            print(f"[{beat['id']}] encoded duration rounded to zero -- skipped")
+        if encoded_dur < MIN_RENDER_DUR:
+            print(f"[{beat['id']}] effective duration is below the empirical minimum render duration -- skipped")
             continue
         out = os.path.join(tmp, f"muxed_{beat['id']}.mp4")
         fc = (f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase,"
