@@ -122,9 +122,13 @@ names remain aliases.
 
 ### A-roll transcription profiles
 
-The initial accurate multilingual A-roll profile is
-`large-v3-turbo` / `cpu` / `int8`. The configurable light fallback is
-`small` / `cpu` / `int8`. English-only projects may explicitly select a
+The operational multilingual A-roll profile is `small` / `cpu` / `int8`.
+`large-v3-turbo` / `cpu` / `int8` remains a configurable accurate profile.
+This operational choice is measured, rather than an accuracy ranking: on a
+15.583333 s fixture, warm uncached runs took 6.198 s (RTF 0.398) for small and
+17.496 s (RTF 1.123) for large (2.82x slower); cold-run observed peaks were at
+least 519 MiB and 1.64 GiB, respectively. Both runs yielded the expected 20
+monotonic words in 3 segments. English-only projects may explicitly select a
 Distil-Whisper model supported by faster-whisper with `cpu` / `int8`; it is not
 the multilingual default. `caption_whisper_model`,
 `caption_whisper_device`, and `caption_whisper_compute_type` remain

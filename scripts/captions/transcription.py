@@ -259,7 +259,7 @@ def build_source_transcript(
     source_path: str | Path,
     *,
     language: str | None = None,
-    model_size: str = "large-v3-turbo",
+    model_size: str = "small",
     device: str = "cpu",
     compute_type: str = "int8",
 ) -> dict[str, Any]:

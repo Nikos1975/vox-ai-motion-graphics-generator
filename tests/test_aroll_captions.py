@@ -1,4 +1,5 @@
 import hashlib
+import ast
 import json
 import math
 import sys
@@ -41,7 +42,7 @@ class SourceTranscriptCacheTests(unittest.TestCase):
             compute_type=kwargs.get("compute_type", "int8"),
         )
 
-    def test_unconfigured_source_uses_accurate_cpu_profile(self):
+    def test_unconfigured_source_uses_operational_small_cpu_profile(self):
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
             project.mkdir()
@@ -52,7 +53,7 @@ class SourceTranscriptCacheTests(unittest.TestCase):
                 return_value=self.transcript(),
             ):
                 build_source_transcript(project, source)
-            self.assertEqual(load_model.call_args.args, ("large-v3-turbo", "cpu", "int8"))
+            self.assertEqual(load_model.call_args.args, ("small", "cpu", "int8"))
 
     def test_light_cpu_profile_is_configurable(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -307,10 +308,33 @@ class ArollBeatTests(unittest.TestCase):
             self.assertFalse((project / "_source_audio.mp3").exists())
         self.assertEqual(build.call_count, 1)
         self.assertEqual(build.call_args.args[1], source)
+        self.assertEqual(build.call_args.kwargs["model_size"], "small")
+        self.assertEqual(build.call_args.kwargs["device"], "cpu")
+        self.assertEqual(build.call_args.kwargs["compute_type"], "int8")
         self.assertEqual(doc["caption_mode"], "word")
-        self.assertEqual(doc["caption_whisper_model"], "large-v3-turbo")
+        self.assertEqual(doc["caption_whisper_model"], "small")
         self.assertEqual(doc["caption_whisper_device"], "cpu")
         self.assertEqual(doc["caption_whisper_compute_type"], "int8")
+
+    def test_cli_model_default_uses_operational_small_profile(self):
+        tree = ast.parse((ROOT / "scripts" / "asr_beats.py").read_text(encoding="utf-8"))
+        model_options = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "add_argument"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and node.args[0].value == "--model"
+        ]
+        self.assertEqual(len(model_options), 1)
+        defaults = {
+            keyword.arg: keyword.value.value
+            for keyword in model_options[0].keywords
+            if keyword.arg == "default" and isinstance(keyword.value, ast.Constant)
+        }
+        self.assertEqual(defaults["default"], "small")
 
     def test_run_rejects_transcript_without_valid_timed_words(self):
         with tempfile.TemporaryDirectory() as tmp:

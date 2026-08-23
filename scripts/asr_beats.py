@@ -138,7 +138,7 @@ def run(
     language="en",
     keyterms=None,
     max_beat_dur=MAX_BEAT_DUR,
-    model_size="large-v3-turbo",
+    model_size="small",
     device="cpu",
     compute_type="int8",
 ):
@@ -199,7 +199,7 @@ if __name__ == "__main__":
     parser.add_argument("project_dir", help="Project directory")
     parser.add_argument("source", help="Source video or audio file")
     parser.add_argument("--language", default="en")
-    parser.add_argument("--model", default="large-v3-turbo", dest="model_size")
+    parser.add_argument("--model", default="small", dest="model_size")
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--compute-type", default="int8")
     args = parser.parse_args()
