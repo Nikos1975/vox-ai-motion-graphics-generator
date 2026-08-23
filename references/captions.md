@@ -26,15 +26,17 @@ per-beat narration audio
 
 ### B-roll/C-roll cache identity
 
-The B-roll/C-roll cache is a timeline fingerprint: narration-audio SHA-256 plus
-each beat's final timeline start/duration, model size, requested language, and
-compute type. Changing any of those causes a new transcription. The execution
-device is not part of the cache identity because it selects where the same model
-computation runs rather than requesting different transcript semantics.
+The B-roll/C-roll cache is a timeline fingerprint: each beat's ID,
+narration-audio SHA-256, final timeline start/duration, model size, requested
+language, and compute type. Changing any of those causes a new transcription.
+The execution device is not part of the cache identity because it selects where
+the same model computation runs rather than requesting different transcript
+semantics.
 
-## Canonical transcript schema
+## Shared transcript semantic core
 
-B-roll, C-roll, and A-roll use the same persisted transcript shape:
+B-roll, C-roll, and A-roll use this shared semantic core for the transcript
+content and word timestamps:
 
 ```json
 {
@@ -52,6 +54,13 @@ B-roll, C-roll, and A-roll use the same persisted transcript shape:
   ]
 }
 ```
+
+This is not the complete persisted `captions/transcript.json` shape. That file
+surrounds the shared core with `schema_version`, `source_fingerprint`, `model`,
+`requested_language`, and `compute_type` metadata. B-roll/C-roll segments may
+also include `beat_id` to identify their timeline beat. A-roll's semantic
+contract for `language`, segments, and word timestamps remains the same; its
+source transcript is remapped to edit-time segments during assembly.
 
 ## beats.json controls
 
