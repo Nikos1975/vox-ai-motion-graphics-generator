@@ -21,7 +21,8 @@ from captions.subtitle_utils import ffmpeg_filter_path
 RES = {"16:9": (1920, 1080), "9:16": (1080, 1920), "1:1": (1080, 1080),
        "4:3": (1440, 1080), "3:4": (1080, 1440)}
 FPS = 24
-MIN_FRAME_DUR = math.ceil(100 / FPS) / 100
+# Empirical 24 fps/AAC timestamp floor: 0.10-0.50s cuts exceed the 5ms bound; 1.00s does not.
+MIN_RENDER_DUR = 1.0
 
 
 def ff(args):
@@ -210,10 +211,10 @@ def run(project_dir):
         if source_cut_dur <= 0:
             print(f"[{beat['id']}] source cut duration rounded to zero -- skipped")
             continue
-        if source_cut_dur < MIN_FRAME_DUR:
+        if source_cut_dur < MIN_RENDER_DUR:
             print(
-                f"[{beat['id']}] source cut is shorter than one {FPS} fps frame "
-                f"({MIN_FRAME_DUR:.2f}s) -- skipped"
+                f"[{beat['id']}] source cut is below the empirical minimum render duration "
+                f"({MIN_RENDER_DUR:.2f}s at {FPS} fps/AAC) -- skipped"
             )
             continue
         audio_path = os.path.join(tmp, f"audio_{beat['id']}.m4a")
@@ -240,7 +241,7 @@ def run(project_dir):
 
     if not muxed:
         raise SystemExit(
-            "No beats had a generated clip or renderable duration -- "
+            "No beats had a generated clip or minimum render duration -- "
             "run aroll_clips.py and check beat durations."
         )
 

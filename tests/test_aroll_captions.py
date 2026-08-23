@@ -747,28 +747,29 @@ class ArollAssemblyTests(unittest.TestCase):
             project = self.make_project(tmp, "off")
             doc_path = project / "beats.json"
             doc = json.loads(doc_path.read_text(encoding="utf-8"))
-            doc["beats"][0].update(end=1.29, dur=0.29)
+            doc["beats"][0].update(end=2.29, dur=1.29)
             doc_path.write_text(json.dumps(doc), encoding="utf-8")
             calls, _generate = self.run_captured(project, durations=[2.0, 2.0])
         extraction_call = next(call for call in calls if "-vn" in call)
         mux_call = next(call for call in calls if "1:a:0" in call)
-        self.assertEqual(extraction_call[extraction_call.index("-t") + 1], "0.29")
-        self.assertEqual(mux_call[mux_call.index("-t") + 1], "0.29")
-        self.assertEqual(calls[-1][calls[-1].index("-t") + 1], "0.29")
+        self.assertEqual(extraction_call[extraction_call.index("-t") + 1], "1.29")
+        self.assertEqual(mux_call[mux_call.index("-t") + 1], "1.29")
+        self.assertEqual(calls[-1][calls[-1].index("-t") + 1], "1.29")
 
     def test_source_cut_uses_exact_start_and_does_not_cross_beat_end(self):
+        self.assertEqual(aroll_assemble._source_cut(1.006, 2.005, 1.0), ("1.006", 0.99))
         with tempfile.TemporaryDirectory() as tmp:
             project = self.make_project(tmp, "off")
             doc_path = project / "beats.json"
             doc = json.loads(doc_path.read_text(encoding="utf-8"))
-            doc["beats"][0].update(start=1.006, end=2.005, dur=1.0)
+            doc["beats"][0].update(start=1.006, end=2.006, dur=1.0)
             doc_path.write_text(json.dumps(doc), encoding="utf-8")
             calls, _generate = self.run_captured(project, durations=[2.0, 2.0])
         extraction_call = next(call for call in calls if "-vn" in call)
         mux_call = next(call for call in calls if "1:a:0" in call)
         self.assertEqual(extraction_call[extraction_call.index("-ss") + 1], "1.006")
-        self.assertEqual(extraction_call[extraction_call.index("-t") + 1], "0.99")
-        self.assertEqual(mux_call[mux_call.index("-t") + 1], "0.99")
+        self.assertEqual(extraction_call[extraction_call.index("-t") + 1], "1.00")
+        self.assertEqual(mux_call[mux_call.index("-t") + 1], "1.00")
 
     def test_exact_centisecond_source_bounds_keep_a_one_second_cut(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -792,23 +793,34 @@ class ArollAssemblyTests(unittest.TestCase):
             doc["beats"][0].update(start=0.10, end=0.11, dur=0.01)
             doc_path.write_text(json.dumps(doc), encoding="utf-8")
             with patch.object(aroll_assemble, "ff") as ff:
-                with self.assertRaisesRegex(SystemExit, "renderable duration"):
+                with self.assertRaisesRegex(SystemExit, "minimum render duration"):
                     aroll_assemble.run(str(project))
         ff.assert_not_called()
 
-    def test_exact_centisecond_source_bounds_keep_a_representable_cut(self):
+    def test_just_below_minimum_render_duration_is_skipped_before_ffmpeg(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = self.make_project(tmp, "off")
+            doc_path = project / "beats.json"
+            doc = json.loads(doc_path.read_text(encoding="utf-8"))
+            doc["beats"][0].update(start=0.10, end=1.09, dur=0.99)
+            doc_path.write_text(json.dumps(doc), encoding="utf-8")
+            with patch.object(aroll_assemble, "ff") as ff:
+                with self.assertRaisesRegex(SystemExit, "minimum render duration"):
+                    aroll_assemble.run(str(project))
+        ff.assert_not_called()
+
+    def test_exact_centisecond_source_bounds_are_not_lost_before_renderability_check(self):
+        self.assertEqual(aroll_assemble._source_cut(0.10, 0.15, 0.05), ("0.1", 0.05))
         with tempfile.TemporaryDirectory() as tmp:
             project = self.make_project(tmp, "off")
             doc_path = project / "beats.json"
             doc = json.loads(doc_path.read_text(encoding="utf-8"))
             doc["beats"][0].update(start=0.10, end=0.15, dur=0.05)
             doc_path.write_text(json.dumps(doc), encoding="utf-8")
-            calls, _generate = self.run_captured(project, durations=[2.0, 2.0])
-        extraction_call = next(call for call in calls if "-vn" in call)
-        mux_call = next(call for call in calls if "1:a:0" in call)
-        self.assertEqual(extraction_call[extraction_call.index("-ss") + 1], "0.1")
-        self.assertEqual(extraction_call[extraction_call.index("-t") + 1], "0.05")
-        self.assertEqual(mux_call[mux_call.index("-t") + 1], "0.05")
+            with patch.object(aroll_assemble, "ff") as ff:
+                with self.assertRaisesRegex(SystemExit, "minimum render duration"):
+                    aroll_assemble.run(str(project))
+        ff.assert_not_called()
 
     def test_unprobeable_clip_or_audio_skips_the_beat(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -836,7 +848,7 @@ class ArollAssemblyTests(unittest.TestCase):
                     "aspect": "tiny",
                     "caption_mode": caption_mode,
                     "beats": [{
-                        "id": 1, "start": 0.0, "end": 1.0, "dur": 1.0,
+                        "id": 1, "start": 0.1, "end": 1.1, "dur": 1.0,
                         "clip_path": str(source),
                     }],
                 }
@@ -852,10 +864,10 @@ class ArollAssemblyTests(unittest.TestCase):
                         "compute_type": "int8",
                         "language": "en",
                         "segments": [{
-                            "start": 0.0, "end": 0.8, "text": "test tone",
+                            "start": 0.1, "end": 0.9, "text": "test tone",
                             "words": [
-                                {"word": "test", "start": 0.0, "end": 0.3},
-                                {"word": "tone", "start": 0.4, "end": 0.8},
+                                {"word": "test", "start": 0.1, "end": 0.4},
+                                {"word": "tone", "start": 0.5, "end": 0.9},
                             ],
                         }],
                     }), encoding="utf-8")
