@@ -1,6 +1,7 @@
 # Word-timed captions
 
-Vox supports word-timed ASS captions for B-roll and C-roll assembly. The caption subsystem is local and separate from MuAPI generation.
+Vox supports local word-timed ASS captions. The caption subsystem uses
+faster-whisper and ffmpeg/libass; it is separate from MuAPI generation.
 
 ## Install
 
@@ -10,7 +11,7 @@ python -m pip install -r requirements-captions.txt
 
 `ffmpeg` must include the `subtitles` / libass filter.
 
-## Data flow
+## B-roll and C-roll data flow
 
 ```text
 per-beat narration audio
@@ -39,7 +40,7 @@ The cached transcript is keyed by narration-audio SHA-256 plus each beat's final
 }
 ```
 
-- `caption_mode`: `word` (default), `static`, or `off`.
+- `caption_mode`: `word` (default), `static`, or `off` for B-roll/C-roll.
 - `caption_style`: `editorial`, `classic`, `hormozi`, `mrbeast`, `karaoke`, `minimal`, or `bounce`. Legacy `white` and `paper` remain accepted aliases.
 - `caption_position`: percentage from the bottom, `0`–`50`.
 - `caption_whisper_model`: faster-whisper model size. Environment fallback: `VOX_CAPTION_WHISPER_MODEL`; default `base`.
@@ -47,6 +48,45 @@ The cached transcript is keyed by narration-audio SHA-256 plus each beat's final
 
 The caption renderer writes word timing from the transcription result; it does not estimate timestamps from narration text.
 
-## Scope
+## A-roll captions
 
-This first integration wires word-timed captions into the shared B-roll/C-roll `assemble.py` path. A-roll retains its existing assembly path for now; the caption package is intentionally reusable so A-roll can adopt the same transcript contract in a later change.
+A-roll uses one canonical local transcript for both beat construction and captions:
+
+```text
+original source video/audio
+→ SHA-256-keyed faster-whisper transcript
+→ out/<project>/captions/transcript.json
+├→ timed A-roll beats
+└→ successful edit-span remapping → shared ASS renderer → captions/captions.ass
+```
+
+`asr_beats.py` directly hashes and transcribes the original source media once,
+then writes a new A-roll `beats.json` with `"caption_mode": "word"`. During
+assembly, A-roll reads that same cached transcript and remaps its source word
+timestamps onto the final edit timeline. It does not transcribe again or invent
+word timings. The final A-roll retains the original source-audio segments.
+
+A-roll accepts only `"caption_mode": "word"` and `"caption_mode": "off"`.
+`word` burns ASS captions through the shared renderer; `off` skips transcript
+loading and caption rendering. A-roll projects created before this support that
+omit `caption_mode` remain `off` for compatibility. A-roll does not add a
+`static` mode; B-roll/C-roll `word` (default), `static`, and `off` behavior is
+unchanged.
+
+All modes share these caption styles: `editorial`, `classic`, `hormozi`,
+`mrbeast`, `karaoke`, `minimal`, and `bounce`. The legacy `white` and `paper`
+names remain aliases.
+
+### A-roll transcription profiles
+
+The initial accurate multilingual A-roll profile is
+`large-v3-turbo` / `cpu` / `int8`. The configurable light fallback is
+`small` / `cpu` / `int8`. English-only projects may explicitly select a
+Distil-Whisper model supported by faster-whisper with `cpu` / `int8`; it is not
+the multilingual default. `caption_whisper_model`,
+`caption_whisper_device`, and `caption_whisper_compute_type` remain
+configurable. These profiles do not depend on a 2 GB GPU.
+
+This phase adds no original `openai-whisper`, Qwen3-ASR, `whisper.cpp`,
+`llama.cpp`, vLLM, or bitsandbytes backend. It also adds no YouTube ingestion,
+`pytube`, or `yt-dlp`; remote `source_audio_url` flow is removed and unneeded.
