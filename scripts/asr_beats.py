@@ -7,7 +7,12 @@ import os
 import subprocess
 from pathlib import Path
 
-from captions.transcription import build_source_transcript
+from captions.transcription import (
+    AROLL_DEFAULT_COMPUTE_TYPE,
+    AROLL_DEFAULT_DEVICE,
+    AROLL_DEFAULT_MODEL_SIZE,
+    build_source_transcript,
+)
 
 MAX_BEAT_DUR = 9.5
 MIN_BEAT_DUR = 2.0
@@ -138,9 +143,9 @@ def run(
     language="en",
     keyterms=None,
     max_beat_dur=MAX_BEAT_DUR,
-    model_size="small",
-    device="cpu",
-    compute_type="int8",
+    model_size=AROLL_DEFAULT_MODEL_SIZE,
+    device=AROLL_DEFAULT_DEVICE,
+    compute_type=AROLL_DEFAULT_COMPUTE_TYPE,
 ):
     del keyterms
     project = Path(project_dir)
@@ -199,9 +204,9 @@ if __name__ == "__main__":
     parser.add_argument("project_dir", help="Project directory")
     parser.add_argument("source", help="Source video or audio file")
     parser.add_argument("--language", default="en")
-    parser.add_argument("--model", default="small", dest="model_size")
-    parser.add_argument("--device", default="cpu")
-    parser.add_argument("--compute-type", default="int8")
+    parser.add_argument("--model", default=AROLL_DEFAULT_MODEL_SIZE, dest="model_size")
+    parser.add_argument("--device", default=AROLL_DEFAULT_DEVICE)
+    parser.add_argument("--compute-type", default=AROLL_DEFAULT_COMPUTE_TYPE)
     args = parser.parse_args()
     run(
         os.path.abspath(args.project_dir),

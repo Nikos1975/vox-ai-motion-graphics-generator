@@ -11,7 +11,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from captions.transcription import build_source_transcript
+from captions.transcription import build_source_transcript, load_cached_source_transcript
 from captions.subtitle_utils import ffmpeg_filter_path
 import asr_beats
 import aroll_assemble
@@ -35,12 +35,14 @@ class SourceTranscriptCacheTests(unittest.TestCase):
         }
 
     def call(self, project, source, **kwargs):
-        return build_source_transcript(
-            project, source, language=kwargs.get("language", "en"),
-            model_size=kwargs.get("model_size", "large-v3-turbo"),
-            device=kwargs.get("device", "cpu"),
-            compute_type=kwargs.get("compute_type", "int8"),
-        )
+        options = {
+            "language": kwargs.get("language", "en"),
+            "device": kwargs.get("device", "cpu"),
+            "compute_type": kwargs.get("compute_type", "int8"),
+        }
+        if "model_size" in kwargs:
+            options["model_size"] = kwargs["model_size"]
+        return build_source_transcript(project, source, **options)
 
     def test_unconfigured_source_uses_operational_small_cpu_profile(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -67,6 +69,21 @@ class SourceTranscriptCacheTests(unittest.TestCase):
             ):
                 self.call(project, source, model_size="small", device="cpu", compute_type="int8")
             self.assertEqual(load_model.call_args.args, ("small", "cpu", "int8"))
+
+    def test_unconfigured_source_cache_round_trips_through_read_only_loader(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            project.mkdir()
+            source = Path(tmp) / "source.mp4"
+            source.write_bytes(b"source")
+            with patch("captions.transcription._load_model", return_value=object()), patch(
+                "captions.transcription._transcribe_with_model",
+                return_value=self.transcript(),
+            ) as transcribe:
+                built = build_source_transcript(project, source, language="en")
+                loaded = load_cached_source_transcript(project, source, language="en")
+        self.assertEqual(transcribe.call_count, 1)
+        self.assertEqual(loaded, built)
 
     def test_source_media_is_both_fingerprint_and_transcription_input(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -179,7 +196,7 @@ class SourceTranscriptCacheTests(unittest.TestCase):
 
     def test_model_language_and_compute_type_each_invalidate_cache(self):
         changes = [
-            ({}, {"model_size": "small"}),
+            ({}, {"model_size": "large-v3-turbo"}),
             ({}, {"language": "el"}),
             ({}, {"compute_type": "default"}),
         ]
@@ -329,12 +346,15 @@ class ArollBeatTests(unittest.TestCase):
             and node.args[0].value == "--model"
         ]
         self.assertEqual(len(model_options), 1)
-        defaults = {
-            keyword.arg: keyword.value.value
+        defaults = [
+            keyword.value
             for keyword in model_options[0].keywords
-            if keyword.arg == "default" and isinstance(keyword.value, ast.Constant)
-        }
-        self.assertEqual(defaults["default"], "small")
+            if keyword.arg == "default"
+        ]
+        self.assertEqual(len(defaults), 1)
+        self.assertIsInstance(defaults[0], ast.Name)
+        self.assertEqual(defaults[0].id, "AROLL_DEFAULT_MODEL_SIZE")
+        self.assertEqual(asr_beats.AROLL_DEFAULT_MODEL_SIZE, "small")
 
     def test_run_rejects_transcript_without_valid_timed_words(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -535,6 +555,16 @@ class ArollAssemblyTests(unittest.TestCase):
         ) as generate:
             aroll_assemble.run(str(project))
         return calls, generate
+
+    def test_source_transcript_loader_uses_operational_defaults_when_doc_omits_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "source.mp4"
+            source.write_bytes(b"source")
+            doc = {"source_video": str(source), "language": "en"}
+            with patch.object(aroll_assemble, "load_cached_source_transcript", return_value={}) as load:
+                self.assertEqual(aroll_assemble._load_source_transcript(tmp, doc), {})
+        self.assertEqual(load.call_args.kwargs["model_size"], "small")
+        self.assertEqual(load.call_args.kwargs["compute_type"], "int8")
 
     def test_missing_caption_mode_preserves_legacy_off_behavior(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -7,6 +7,11 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 
+AROLL_DEFAULT_MODEL_SIZE = "small"
+AROLL_DEFAULT_DEVICE = "cpu"
+AROLL_DEFAULT_COMPUTE_TYPE = "int8"
+
+
 class CaptionDependencyError(RuntimeError):
     pass
 
@@ -235,8 +240,8 @@ def load_cached_source_transcript(
     source_path: str | Path,
     *,
     language: str | None = None,
-    model_size: str = "large-v3-turbo",
-    compute_type: str = "int8",
+    model_size: str = AROLL_DEFAULT_MODEL_SIZE,
+    compute_type: str = AROLL_DEFAULT_COMPUTE_TYPE,
 ) -> dict[str, Any] | None:
     """Read a valid canonical A-roll source transcript without transcribing."""
     project = Path(project_dir)
@@ -259,9 +264,9 @@ def build_source_transcript(
     source_path: str | Path,
     *,
     language: str | None = None,
-    model_size: str = "small",
-    device: str = "cpu",
-    compute_type: str = "int8",
+    model_size: str = AROLL_DEFAULT_MODEL_SIZE,
+    device: str = AROLL_DEFAULT_DEVICE,
+    compute_type: str = AROLL_DEFAULT_COMPUTE_TYPE,
 ) -> dict[str, Any]:
     project = Path(project_dir)
     source = Path(source_path)

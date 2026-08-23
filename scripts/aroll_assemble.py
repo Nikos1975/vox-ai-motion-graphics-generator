@@ -9,7 +9,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-from captions.transcription import load_cached_source_transcript
+from captions.transcription import (
+    AROLL_DEFAULT_COMPUTE_TYPE,
+    AROLL_DEFAULT_MODEL_SIZE,
+    load_cached_source_transcript,
+)
 from captions.subtitles import generate_ass
 from captions.subtitle_utils import ffmpeg_filter_path
 
@@ -132,8 +136,8 @@ def _load_source_transcript(project_dir, doc):
         project_dir,
         doc["source_video"],
         language=doc.get("language"),
-        model_size=doc.get("caption_whisper_model", "large-v3-turbo"),
-        compute_type=doc.get("caption_whisper_compute_type", "int8"),
+        model_size=doc.get("caption_whisper_model", AROLL_DEFAULT_MODEL_SIZE),
+        compute_type=doc.get("caption_whisper_compute_type", AROLL_DEFAULT_COMPUTE_TYPE),
     )
     if transcript is None:
         raise RuntimeError(
