@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from captions.transcription import build_source_transcript
+import asr_beats
 
 
 class SourceTranscriptCacheTests(unittest.TestCase):
@@ -237,6 +238,86 @@ class SourceTranscriptCacheTests(unittest.TestCase):
             self.assertEqual(result["language"], "en")
             self.assertEqual(load_model.call_args_list[0].args[1], "auto")
             self.assertEqual(load_model.call_args_list[1].args[1], "cpu")
+
+
+class ArollBeatTests(unittest.TestCase):
+    @staticmethod
+    def canonical_fixture():
+        return {"language": "en", "segments": [{"words": [
+            {"word": "Hello", "start": 0.25, "end": 0.7},
+            {"word": "world.", "start": 0.8, "end": 1.2},
+            {"word": "Again", "start": 2.0, "end": 2.5},
+        ]}]}
+
+    def test_canonical_word_field_and_genuine_times_drive_beats(self):
+        words = asr_beats.words_from_transcript(self.canonical_fixture(), source_duration=3.0)
+        beats = asr_beats.segment_words(words, min_dur=0.5, pause_gap=0.35)
+        self.assertEqual(words[0], {"text": "Hello", "start": 0.25, "end": 0.7})
+        self.assertEqual(beats[0]["start"], 0.25)
+        self.assertEqual(beats[-1]["end"], 2.5)
+
+    def test_invalid_words_are_ignored_and_source_bounds_are_clipped(self):
+        transcript = {"segments": [{"words": [
+            {"word": "negative", "start": -2.0, "end": -1.0},
+            {"word": "nan", "start": math.nan, "end": 0.5},
+            {"word": "reversed", "start": 1.0, "end": 0.5},
+            {"word": "outside", "start": 3.1, "end": 4.0},
+            {"word": "clipped", "start": 2.8, "end": 3.4},
+        ]}]}
+        self.assertEqual(
+            asr_beats.words_from_transcript(transcript, 3.0),
+            [{"text": "clipped", "start": 2.8, "end": 3.0}],
+        )
+
+    def test_malformed_transcript_shapes_are_ignored(self):
+        self.assertEqual(asr_beats.words_from_transcript({"segments": None}, 3.0), [])
+        self.assertEqual(asr_beats.words_from_transcript({"segments": [{"words": None}]}, 3.0), [])
+
+    def test_legacy_text_words_preserve_segmentation(self):
+        words = [
+            {"text": "First", "start": 0.0, "end": 0.5},
+            {"text": "sentence.", "start": 0.5, "end": 1.0},
+            {"text": "Second", "start": 1.5, "end": 2.0},
+        ]
+        self.assertEqual(
+            asr_beats.segment_words(words, min_dur=0.5, pause_gap=0.35),
+            [
+                {"start": 0.0, "end": 1.0, "text": "First sentence."},
+                {"start": 1.5, "end": 2.0, "text": "Second"},
+            ],
+        )
+
+    def test_run_transcribes_once_writes_word_mode_and_omits_remote_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            source = Path(tmp) / "source.mp4"
+            source.write_bytes(b"source")
+            with patch.object(
+                asr_beats, "build_source_transcript", return_value=self.canonical_fixture()
+            ) as build, patch.object(asr_beats, "probe_dims", return_value=(1080, 1920)), patch.object(
+                asr_beats, "probe_dur", return_value=4.0
+            ):
+                asr_beats.run(str(project), str(source), language="en")
+            doc = json.loads((project / "beats.json").read_text(encoding="utf-8"))
+        self.assertEqual(build.call_count, 1)
+        self.assertEqual(build.call_args.args[1], source)
+        self.assertEqual(doc["caption_mode"], "word")
+        self.assertEqual(doc["caption_whisper_model"], "large-v3-turbo")
+        self.assertEqual(doc["caption_whisper_device"], "cpu")
+        self.assertEqual(doc["caption_whisper_compute_type"], "int8")
+        self.assertNotIn("source_audio_url", doc)
+        self.assertFalse((project / "_source_audio.mp3").exists())
+
+    def test_run_rejects_transcript_without_valid_timed_words(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            source = Path(tmp) / "source.mp4"
+            source.write_bytes(b"source")
+            with patch.object(asr_beats, "build_source_transcript", return_value={"segments": []}), patch.object(
+                asr_beats, "probe_dur", return_value=4.0
+            ):
+                with self.assertRaisesRegex(RuntimeError, "A-roll transcription produced no valid timed words"):
+                    asr_beats.run(str(project), str(source), language="en")
 
 
 if __name__ == "__main__":
