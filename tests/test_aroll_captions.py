@@ -1,5 +1,4 @@
 import hashlib
-import ast
 import json
 import math
 import shutil
@@ -369,28 +368,15 @@ class ArollBeatTests(unittest.TestCase):
         self.assertEqual(doc["caption_whisper_device"], "cpu")
         self.assertEqual(doc["caption_whisper_compute_type"], "int8")
 
-    def test_cli_model_default_uses_operational_small_profile(self):
-        tree = ast.parse((ROOT / "scripts" / "asr_beats.py").read_text(encoding="utf-8"))
-        model_options = [
-            node
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "add_argument"
-            and node.args
-            and isinstance(node.args[0], ast.Constant)
-            and node.args[0].value == "--model"
-        ]
-        self.assertEqual(len(model_options), 1)
-        defaults = [
-            keyword.value
-            for keyword in model_options[0].keywords
-            if keyword.arg == "default"
-        ]
-        self.assertEqual(len(defaults), 1)
-        self.assertIsInstance(defaults[0], ast.Name)
-        self.assertEqual(defaults[0].id, "AROLL_DEFAULT_MODEL_SIZE")
-        self.assertEqual(asr_beats.AROLL_DEFAULT_MODEL_SIZE, "small")
+    def test_cli_defaults_run_with_operational_small_cpu_profile(self):
+        with patch.object(asr_beats, "run") as run:
+            asr_beats.main(["project", "source.mp4"])
+        self.assertEqual(run.call_args.kwargs, {
+            "language": "en",
+            "model_size": "small",
+            "device": "cpu",
+            "compute_type": "int8",
+        })
 
     def test_run_rejects_transcript_without_valid_timed_words(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -650,6 +636,52 @@ class ArollAssemblyTests(unittest.TestCase):
         filter_graph = final_call[final_call.index("-filter_complex") + 1]
         self.assertIn(expected, filter_graph)
         self.assertEqual(final_call[final_call.index("-t") + 1], "1.00")
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg and ffprobe required")
+    def test_real_ffmpeg_word_captions_support_apostrophe_in_ass_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project's"
+            project.mkdir()
+            source = project / "source.mp4"
+            subprocess.run([
+                "ffmpeg", "-y", "-loglevel", "error",
+                "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=24",
+                "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+                "-t", "2", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(source),
+            ], check=True)
+            doc = {
+                "mode": "aroll",
+                "source_video": str(source),
+                "language": "en",
+                "aspect": "tiny",
+                "caption_mode": "word",
+                "caption_whisper_model": "large-v3-turbo",
+                "caption_whisper_device": "cpu",
+                "caption_whisper_compute_type": "int8",
+                "beats": [{
+                    "id": 1, "start": 0.0, "end": 1.0, "dur": 1.0,
+                    "narration": "apostrophe path", "clip_path": str(source),
+                }],
+            }
+            (project / "beats.json").write_text(json.dumps(doc), encoding="utf-8")
+            self.write_transcript(project, [{"word": "visible", "start": 0.1, "end": 0.6}])
+
+            with patch.dict(aroll_assemble.RES, {"tiny": (64, 64)}):
+                aroll_assemble.run(str(project))
+
+            ass = project / "captions" / "captions.ass"
+            final = project / "final.mp4"
+            self.assertIn("'", str(ass))
+            self.assertIn("visible", ass.read_text(encoding="utf-8"))
+            self.assertTrue(final.is_file())
+            streams = json.loads(subprocess.run([
+                "ffprobe", "-v", "error", "-show_entries", "stream=codec_type",
+                "-of", "json", str(final),
+            ], capture_output=True, text=True, check=True).stdout)["streams"]
+            self.assertEqual(
+                sorted(stream["codec_type"] for stream in streams),
+                ["audio", "video"],
+            )
 
     def test_ffconcat_line_normalizes_windows_paths_and_escapes_apostrophes(self):
         self.assertEqual(

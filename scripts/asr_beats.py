@@ -199,7 +199,7 @@ def run(
     print(f"ASR beats skeleton written to {out_file}")
 
 
-if __name__ == "__main__":
+def main(argv=None):
     parser = argparse.ArgumentParser(description="ASR bridge for A-roll mode")
     parser.add_argument("project_dir", help="Project directory")
     parser.add_argument("source", help="Source video or audio file")
@@ -207,7 +207,7 @@ if __name__ == "__main__":
     parser.add_argument("--model", default=AROLL_DEFAULT_MODEL_SIZE, dest="model_size")
     parser.add_argument("--device", default=AROLL_DEFAULT_DEVICE)
     parser.add_argument("--compute-type", default=AROLL_DEFAULT_COMPUTE_TYPE)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     run(
         os.path.abspath(args.project_dir),
         os.path.abspath(args.source),
@@ -216,3 +216,7 @@ if __name__ == "__main__":
         device=args.device,
         compute_type=args.compute_type,
     )
+
+
+if __name__ == "__main__":
+    main()
