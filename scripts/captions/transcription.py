@@ -205,7 +205,7 @@ def _read_cached_transcript(
         return None
     try:
         cached = json.loads(transcript_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None
     if not _is_valid_cached_transcript(cached, require_words=require_words):
         return None

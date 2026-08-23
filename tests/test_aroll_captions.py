@@ -95,6 +95,23 @@ class SourceTranscriptCacheTests(unittest.TestCase):
             self.assertEqual(first, second)
             self.assertEqual(path.read_bytes(), original)
 
+    def test_invalid_utf8_cache_is_retranscribed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            project.mkdir()
+            source = Path(tmp) / "source.mp4"
+            source.write_bytes(b"source")
+            cache_path = project / "captions" / "transcript.json"
+            cache_path.parent.mkdir()
+            cache_path.write_bytes(b"\xff")
+            with patch("captions.transcription._load_model", return_value=object()), patch(
+                "captions.transcription._transcribe_with_model",
+                return_value=self.transcript(),
+            ) as transcribe:
+                result = self.call(project, source)
+            self.assertEqual(transcribe.call_count, 1)
+            self.assertEqual(result["segments"][0]["words"][0]["word"], "real")
+
     def test_device_change_reuses_cache_without_retranscribing_or_rewriting(self):
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
