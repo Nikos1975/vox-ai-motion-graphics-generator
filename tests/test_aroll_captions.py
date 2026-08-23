@@ -31,10 +31,23 @@ class SourceTranscriptCacheTests(unittest.TestCase):
     def call(self, project, source, **kwargs):
         return build_source_transcript(
             project, source, language=kwargs.get("language", "en"),
-            model_size=kwargs.get("model_size", "small"),
+            model_size=kwargs.get("model_size", "large-v3-turbo"),
             device=kwargs.get("device", "cpu"),
             compute_type=kwargs.get("compute_type", "int8"),
         )
+
+    def test_unconfigured_source_uses_accurate_cpu_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            project.mkdir()
+            source = Path(tmp) / "source.mp4"
+            source.write_bytes(b"source")
+            with patch("captions.transcription._load_model", return_value=object()) as load_model, patch(
+                "captions.transcription._transcribe_with_model",
+                return_value=self.transcript(),
+            ):
+                build_source_transcript(project, source)
+            self.assertEqual(load_model.call_args.args, ("large-v3-turbo", "cpu", "int8"))
 
     def test_source_media_is_both_fingerprint_and_transcription_input(self):
         with tempfile.TemporaryDirectory() as tmp:
