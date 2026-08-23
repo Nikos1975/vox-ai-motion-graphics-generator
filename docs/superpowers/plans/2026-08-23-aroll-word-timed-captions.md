@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3 standard library, `faster-whisper`, ffmpeg/ffprobe with libass, `unittest`, existing `scripts/captions` package, Git, GitHub CLI.
 
-**Canonical ASR defaults:** A-roll uses local faster-whisper `small` / `cpu` / `int8` as the safe multilingual default and therefore does not depend on the available 2 GB GPU. English-only callers may explicitly choose `distil-small.en` / `cpu` / `int8` as an optimization. Distil-Whisper is not the universal default. B-roll/C-roll retain their existing `base` / `auto` / `default` settings unless explicitly configured. Both paths preserve one canonical `captions/transcript.json`; A-roll assembly never transcribes.
+**Canonical ASR profiles:** A-roll uses local faster-whisper only. The accurate multilingual default is `large-v3-turbo` / `cpu` / `int8`; the light fallback is `small` / `cpu` / `int8`. English-only callers may explicitly choose a Distil-Whisper model through faster-whisper with `cpu` / `int8`, but Distil-Whisper is not the multilingual default. Model, device, and compute type remain configurable. No profile depends on the target PC's 2 GB GPU. Real validation benchmarks the accurate profile; if measured wall time is unreasonable, the operational default changes to the measured light profile without changing architecture. B-roll/C-roll retain their existing `base` / `auto` / `default` settings unless explicitly configured. Both paths preserve one canonical `captions/transcript.json`; A-roll assembly never transcribes. Do not add original `openai-whisper`, Qwen3-ASR, whisper.cpp, llama.cpp, vLLM, or bitsandbytes.
 
 ---
 
@@ -71,7 +71,7 @@ class SourceTranscriptCacheTests(unittest.TestCase):
     def call(self, project, source, **kwargs):
         return build_source_transcript(
             project, source, language=kwargs.get("language", "en"),
-            model_size=kwargs.get("model_size", "small"),
+            model_size=kwargs.get("model_size", "large-v3-turbo"),
             device=kwargs.get("device", "cpu"),
             compute_type=kwargs.get("compute_type", "int8"),
         )
@@ -126,7 +126,7 @@ class SourceTranscriptCacheTests(unittest.TestCase):
 
     def test_model_language_and_compute_type_each_invalidate_cache(self):
         changes = [
-            ({}, {"model_size": "distil-small.en"}),
+            ({}, {"model_size": "small"}),
             ({}, {"language": "el"}),
             ({}, {"compute_type": "int8"}),
         ]
@@ -217,7 +217,7 @@ def build_source_transcript(
     source_path: str | Path,
     *,
     language: str | None = None,
-    model_size: str = "small",
+    model_size: str = "large-v3-turbo",
     device: str = "cpu",
     compute_type: str = "int8",
 ) -> dict[str, Any]:
@@ -356,7 +356,7 @@ In `scripts/asr_beats.py`:
 - Raise `RuntimeError("A-roll transcription produced no valid timed words")` if flattening or segmentation yields no beats.
 - Write `"caption_mode": "word"` explicitly, plus the selected `caption_whisper_model`, `caption_whisper_device`, and `caption_whisper_compute_type` values.
 - Keep `source_video`, aspect detection, theme, model, and beat fields used by `aroll_clips.py`.
-- Add CLI flags `--model`, `--device`, and `--compute-type` with A-roll defaults `small`, `cpu`, and `int8`; pass them through without adding dependencies. Document `distil-small.en`, `cpu`, `int8` as an explicit English-only optimization, not a universal default.
+- Add CLI flags `--model`, `--device`, and `--compute-type` with the initial accurate A-roll defaults `large-v3-turbo`, `cpu`, and `int8`; pass them through without adding dependencies. Document `small`, `cpu`, `int8` as the light fallback and Distil-Whisper through faster-whisper on `cpu`, `int8` as an explicit English-only optimization, not a universal default. If Task 7 measures unreasonable accurate-profile wall time, change only the operational model default to `small` through a focused RED–GREEN update.
 
 Use this call shape:
 
@@ -697,7 +697,8 @@ Document:
 - shared canonical `{language, segments[{start,end,text,words[{word,start,end}]}]}` semantics;
 - B/C modes `word` default, `static`, and `off` unchanged;
 - newly generated A-roll writes `word`, explicit A-roll `off` disables captions, and missing A-roll mode means `off` for legacy compatibility;
-- A-roll defaults to multilingual `small` / `cpu` / `int8`, needs no 2 GB GPU, and allows explicit English-only `distil-small.en` / `cpu` / `int8` optimization without making Distil-Whisper universal;
+- A-roll's accurate profile is multilingual `large-v3-turbo` / `cpu` / `int8`, its light fallback is `small` / `cpu` / `int8`, it needs no 2 GB GPU, and it allows explicit English-only Distil-Whisper through faster-whisper on `cpu` / `int8` without making Distil-Whisper universal;
+- original `openai-whisper`, Qwen3-ASR, whisper.cpp, llama.cpp, vLLM, and bitsandbytes are not added;
 - the A-roll cache hashes and transcribes the same original source media;
 - source cache identity is digest + model + requested language + compute type, excluding device;
 - A-roll is not transcribed again during assembly;
@@ -777,10 +778,12 @@ If SAPI is unavailable, report the concrete failure and use another installed lo
 - [ ] **Step 2: Run real faster-whisper source transcription**
 
 ```powershell
-python scripts/asr_beats.py out/_aroll-caption-test/synthetic out/_aroll-caption-test/synthetic/source.mp4 --language en --model small --device cpu --compute-type int8
+python scripts/asr_beats.py out/_aroll-caption-test/synthetic out/_aroll-caption-test/synthetic/source.mp4 --language en --model large-v3-turbo --device cpu --compute-type int8
 ```
 
-Record actual detected/requested language, model, effective device/fallback message, compute type, segment count, word count, source duration, first/last word times, and transcript SHA-256. Verify every word is finite, monotonic, inside source duration, and comes from the spoken fixture rather than Vox-fabricated dummy text.
+Measure wall time and, where practical, sample the Python process working set to estimate peak RAM while the command runs. Record actual detected/requested language, model, device, compute type, source duration, transcription wall time, approximate peak RAM, segment count, word count, first/last word times, word-timestamp quality, obvious transcription errors, and transcript SHA-256. Verify every word is finite, monotonic, inside source duration, and comes from the spoken fixture rather than Vox-fabricated dummy text.
+
+If `large-v3-turbo` is unreasonably slow for this short fixture, run the same benchmark with `--model small --device cpu --compute-type int8`. Record the measured reason, then add a focused failing default-profile test, change only the A-roll operational model default to `small`, rerun the focused and full suites, and update the docs to report the measured decision. Do not redesign the cache, add an ASR engine, or introduce GPU-specific code.
 
 - [ ] **Step 3: Prove real cache reuse**
 
