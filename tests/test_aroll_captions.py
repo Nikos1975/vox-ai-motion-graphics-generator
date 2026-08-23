@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from captions.transcription import build_source_transcript
+from captions.subtitle_utils import ffmpeg_filter_path
 import asr_beats
 import aroll_assemble
 from captions.subtitles import generate_ass
@@ -438,6 +439,171 @@ class ArollTimelineTests(unittest.TestCase):
         for event in events:
             fields = event.split(",", 3)
             self.assertGreater(ass_seconds(fields[2]), ass_seconds(fields[1]))
+
+
+class ArollAssemblyTests(unittest.TestCase):
+    def make_project(self, root, caption_mode="missing", *, caption_style=None):
+        project = Path(root) / "project's"
+        project.mkdir()
+        source = project / "source.mp4"
+        clip = project / "clip.mp4"
+        source.write_bytes(b"source")
+        clip.write_bytes(b"clip")
+        doc = {
+            "mode": "aroll",
+            "source_video": str(source),
+            "aspect": "9:16",
+            "beats": [{
+                "id": 1, "start": 1.0, "end": 2.0, "dur": 1.0,
+                "narration": "hello", "clip_path": str(clip),
+            }],
+        }
+        if caption_mode != "missing":
+            doc["caption_mode"] = caption_mode
+        if caption_style is not None:
+            doc["caption_style"] = caption_style
+        (project / "beats.json").write_text(json.dumps(doc), encoding="utf-8")
+        return project
+
+    def write_transcript(self, project, words=None):
+        caption_dir = project / "captions"
+        caption_dir.mkdir()
+        (caption_dir / "transcript.json").write_text(json.dumps({
+            "language": "en", "segments": [{"words": words or [
+                {"word": "hello", "start": 1.1, "end": 1.5},
+            ]}],
+        }), encoding="utf-8")
+
+    def run_captured(self, project, generate_result=True, durations=None):
+        calls = []
+        durations = iter(durations or [1.0])
+
+        def fake_probe(_path):
+            try:
+                return next(durations)
+            except StopIteration:
+                return 1.0
+
+        def fake_generate(_transcript, output, **_kwargs):
+            Path(output).parent.mkdir(parents=True, exist_ok=True)
+            Path(output).write_text("[Events]\n", encoding="utf-8")
+            return generate_result
+
+        with patch.object(aroll_assemble, "ff", side_effect=calls.append), patch.object(
+            aroll_assemble, "probe_dur", side_effect=fake_probe
+        ), patch.object(
+            aroll_assemble, "generate_ass", side_effect=fake_generate
+        ) as generate:
+            aroll_assemble.run(str(project))
+        return calls, generate
+
+    def test_missing_caption_mode_preserves_legacy_off_behavior(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = self.make_project(tmp)
+            calls, generate = self.run_captured(project)
+            final = str(project / "final.mp4")
+        self.assertEqual(generate.call_count, 0)
+        self.assertEqual(calls[-1][-2:], ["copy", final])
+
+    def test_explicit_off_skips_transcript_and_ass(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = self.make_project(tmp, "off")
+            calls, generate = self.run_captured(project)
+            captions_exists = (project / "captions").exists()
+        self.assertFalse(captions_exists)
+        self.assertEqual(generate.call_count, 0)
+        self.assertTrue(calls)
+
+    def test_word_mode_reuses_cache_and_maps_original_audio_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = self.make_project(tmp, "word")
+            self.write_transcript(project)
+            calls, generate = self.run_captured(project)
+        mapped = generate.call_args.args[0]
+        self.assertAlmostEqual(mapped["segments"][0]["words"][0]["start"], 0.1)
+        self.assertFalse(hasattr(aroll_assemble, "build_source_transcript"))
+        self.assertFalse(hasattr(aroll_assemble, "_transcribe_with_model"))
+        mux_call = next(call for call in calls if "1:a:0" in call)
+        self.assertEqual(mux_call.count("1:a:0"), 1)
+        final_call = calls[-1]
+        self.assertEqual(final_call.count("0:a:0"), 1)
+        self.assertEqual(final_call.count("-map"), 2)
+
+    def test_word_mode_uses_windows_safe_ass_filter_and_total_duration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = self.make_project(tmp, "word")
+            self.write_transcript(project)
+            calls, _generate = self.run_captured(project)
+            expected = ffmpeg_filter_path(str(project / "captions" / "captions.ass"))
+        final_call = calls[-1]
+        filter_graph = final_call[final_call.index("-filter_complex") + 1]
+        self.assertIn(expected, filter_graph)
+        self.assertEqual(final_call[final_call.index("-t") + 1], "1.00")
+
+    def test_word_mode_passes_caption_style_and_defaults_position(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = self.make_project(tmp, "word", caption_style="paper")
+            self.write_transcript(project)
+            _calls, generate = self.run_captured(project)
+        self.assertEqual(generate.call_args.kwargs, {
+            "caption_style": "paper",
+            "caption_position": 10,
+            "video_width": 1080,
+            "video_height": 1920,
+        })
+
+    def test_word_mode_records_only_successfully_muxed_beat_spans(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = self.make_project(tmp, "word")
+            doc_path = project / "beats.json"
+            doc = json.loads(doc_path.read_text(encoding="utf-8"))
+            doc["beats"].append({
+                "id": 2, "start": 3.0, "end": 4.0, "dur": 1.0,
+                "narration": "second", "clip_path": doc["beats"][0]["clip_path"],
+            })
+            doc_path.write_text(json.dumps(doc), encoding="utf-8")
+            self.write_transcript(project, [
+                {"word": "discarded", "start": 1.1, "end": 1.5},
+                {"word": "kept", "start": 3.1, "end": 3.5},
+            ])
+            _calls, generate = self.run_captured(project, durations=[0.0, 0.0, 1.0, 1.0])
+        mapped = generate.call_args.args[0]
+        self.assertEqual(len(mapped["segments"]), 1)
+        self.assertEqual(mapped["segments"][0]["beat_id"], 2)
+        self.assertAlmostEqual(mapped["segments"][0]["words"][0]["start"], 0.1)
+
+    def test_unknown_caption_mode_fails(self):
+        with self.assertRaisesRegex(ValueError, "word, off"):
+            aroll_assemble._caption_mode({"caption_mode": "static"})
+        with self.assertRaisesRegex(ValueError, "word, off"):
+            aroll_assemble._caption_mode({"caption_mode": ["word"]})
+
+    def test_word_mode_missing_or_invalid_transcript_fails_clearly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = self.make_project(tmp, "word")
+            with self.assertRaisesRegex(RuntimeError, "A-roll caption transcript"):
+                self.run_captured(project)
+            (project / "captions").mkdir()
+            (project / "captions" / "transcript.json").write_text("{broken", encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "A-roll caption transcript"):
+                self.run_captured(project)
+
+    def test_word_mode_requires_rendered_ass_events(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = self.make_project(tmp, "word")
+            self.write_transcript(project)
+            with self.assertRaisesRegex(RuntimeError, "no caption events"):
+                self.run_captured(project, generate_result=False)
+
+    def test_missing_generated_clips_keep_existing_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = self.make_project(tmp, "off")
+            doc_path = project / "beats.json"
+            doc = json.loads(doc_path.read_text(encoding="utf-8"))
+            del doc["beats"][0]["clip_path"]
+            doc_path.write_text(json.dumps(doc), encoding="utf-8")
+            with self.assertRaisesRegex(SystemExit, "No beats had a generated clip"):
+                aroll_assemble.run(str(project))
 
 
 if __name__ == "__main__":

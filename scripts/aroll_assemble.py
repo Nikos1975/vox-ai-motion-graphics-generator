@@ -7,6 +7,10 @@ import math
 import os
 import subprocess
 import sys
+from pathlib import Path
+
+from captions.subtitles import generate_ass
+from captions.subtitle_utils import ffmpeg_filter_path
 
 RES = {"16:9": (1920, 1080), "9:16": (1080, 1920), "1:1": (1080, 1080),
        "4:3": (1440, 1080), "3:4": (1080, 1440)}
@@ -115,16 +119,40 @@ def remap_source_transcript(transcript, edit_spans):
     return {"language": language, "segments": mapped_segments}
 
 
+def _caption_mode(doc):
+    mode = doc.get("caption_mode", "off")
+    if mode not in ("word", "off"):
+        raise ValueError("A-roll caption_mode must be one of: word, off")
+    return mode
+
+
+def _load_source_transcript(project_dir):
+    transcript_path = Path(project_dir) / "captions" / "transcript.json"
+    try:
+        with transcript_path.open(encoding="utf-8") as handle:
+            transcript = json.load(handle)
+    except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            f"A-roll caption transcript is missing or invalid: {transcript_path}"
+        ) from exc
+    if not isinstance(transcript, dict) or not isinstance(transcript.get("segments"), list):
+        raise RuntimeError(f"A-roll caption transcript is missing or invalid: {transcript_path}")
+    return transcript
+
+
 def run(project_dir):
     bpath = os.path.join(project_dir, "beats.json")
     with open(bpath) as f:
         doc = json.load(f)
     src = doc["source_video"]
     W, H = RES.get(doc.get("aspect", "9:16"), (1080, 1920))
+    caption_mode = _caption_mode(doc)
     tmp = os.path.join(project_dir, "_seg")
     os.makedirs(tmp, exist_ok=True)
 
     muxed = []
+    edit_spans = []
+    output_start = 0.0
     for beat in doc["beats"]:
         clip = beat.get("clip_path")
         if not clip or not os.path.exists(clip):
@@ -144,6 +172,8 @@ def run(project_dir):
         ff(["-i", clip, "-i", audio_path, "-filter_complex", fc, "-map", "[v]", "-map", "1:a:0",
             "-t", f"{d:.2f}", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", out])
         muxed.append(out)
+        edit_spans.append({"beat": beat, "output_start": output_start, "dur": d})
+        output_start += d
         print(f"[{beat['id']}] muxed ({d:.2f}s)")
 
     if not muxed:
@@ -154,7 +184,36 @@ def run(project_dir):
         for m in muxed:
             f.write(f"file '{os.path.abspath(m)}'\n")
     final = os.path.join(project_dir, "final.mp4")
-    ff(["-f", "concat", "-safe", "0", "-i", listf, "-c", "copy", final])
+    if caption_mode == "off":
+        ff(["-f", "concat", "-safe", "0", "-i", listf, "-c", "copy", final])
+        print("FINAL:", final, f"({len(muxed)}/{len(doc['beats'])} beats)")
+        return
+
+    concat_path = os.path.join(tmp, "aroll_concat.mp4")
+    ff(["-f", "concat", "-safe", "0", "-i", listf, "-c", "copy", concat_path])
+    transcript = _load_source_transcript(project_dir)
+    mapped_transcript = remap_source_transcript(transcript, edit_spans)
+    ass_path = Path(project_dir) / "captions" / "captions.ass"
+    created = generate_ass(
+        mapped_transcript,
+        ass_path,
+        caption_style=doc.get("caption_style") or "editorial",
+        caption_position=doc.get("caption_position", 10),
+        video_width=W,
+        video_height=H,
+    )
+    if not created:
+        raise RuntimeError("A-roll caption transcript produced no caption events")
+    total = sum(span["dur"] for span in edit_spans)
+    ass_filter_path = ffmpeg_filter_path(str(ass_path))
+    ff([
+        "-i", concat_path,
+        "-filter_complex", f"[0:v]subtitles=filename='{ass_filter_path}'[v]",
+        "-map", "[v]", "-map", "0:a:0",
+        "-t", f"{total:.2f}",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+        "-pix_fmt", "yuv420p", "-c:a", "copy", final,
+    ])
     print("FINAL:", final, f"({len(muxed)}/{len(doc['beats'])} beats)")
 
 
