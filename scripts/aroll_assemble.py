@@ -3,6 +3,7 @@
 A-roll assembly: muxes each beat's generated visual clip with the ORIGINAL beat segment's audio.
 """
 import json
+import math
 import os
 import subprocess
 import sys
@@ -22,6 +23,97 @@ def probe_dur(path):
         return float(out.strip())
     except ValueError:
         return 0.0
+
+
+def _finite_number(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def remap_source_transcript(transcript, edit_spans):
+    """Map canonical source words onto the successfully assembled edit timeline."""
+    language = transcript.get("language") if isinstance(transcript, dict) else None
+    source_words = []
+    if isinstance(transcript, dict):
+        segments = transcript.get("segments")
+        if isinstance(segments, list):
+            for segment in segments:
+                if not isinstance(segment, dict):
+                    continue
+                words = segment.get("words")
+                if not isinstance(words, list):
+                    continue
+                for index, word in enumerate(words):
+                    if not isinstance(word, dict):
+                        continue
+                    text = word.get("word")
+                    start = _finite_number(word.get("start"))
+                    end = _finite_number(word.get("end"))
+                    if (
+                        not isinstance(text, str)
+                        or not text.strip()
+                        or start is None
+                        or end is None
+                        or start < 0
+                        or end <= start
+                    ):
+                        continue
+                    source_words.append((start, end, index, text))
+
+    source_words.sort(key=lambda item: (item[0], item[1], item[2]))
+    mapped_segments = []
+    if not isinstance(edit_spans, list):
+        return {"language": language, "segments": mapped_segments}
+
+    for span in edit_spans:
+        if not isinstance(span, dict) or not isinstance(span.get("beat"), dict):
+            continue
+        beat = span["beat"]
+        source_start = _finite_number(beat.get("start"))
+        beat_end = _finite_number(beat.get("end"))
+        output_start = _finite_number(span.get("output_start"))
+        duration = _finite_number(span.get("dur"))
+        if (
+            source_start is None
+            or beat_end is None
+            or output_start is None
+            or duration is None
+            or source_start < 0
+            or output_start < 0
+            or duration <= 0
+        ):
+            continue
+
+        source_end = min(beat_end, source_start + duration)
+        output_end = output_start + duration
+        if source_end <= source_start:
+            continue
+
+        words = []
+        for word_start, word_end, _index, text in source_words:
+            if word_end <= source_start or word_start >= source_end:
+                continue
+            clipped_start = max(word_start, source_start)
+            clipped_end = min(word_end, source_end)
+            mapped_start = max(output_start, min(output_end, output_start + clipped_start - source_start))
+            mapped_end = max(output_start, min(output_end, output_start + clipped_end - source_start))
+            if mapped_end <= mapped_start:
+                continue
+            words.append({"word": text, "start": mapped_start, "end": mapped_end})
+
+        if words:
+            mapped_segments.append({
+                "beat_id": beat.get("id"),
+                "start": output_start,
+                "end": output_end,
+                "text": " ".join(word["word"] for word in words),
+                "words": words,
+            })
+
+    return {"language": language, "segments": mapped_segments}
 
 
 def run(project_dir):

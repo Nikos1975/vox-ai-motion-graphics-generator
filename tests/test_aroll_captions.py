@@ -11,6 +11,8 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from captions.transcription import build_source_transcript
 import asr_beats
+import aroll_assemble
+from captions.subtitles import generate_ass
 
 
 class SourceTranscriptCacheTests(unittest.TestCase):
@@ -318,6 +320,103 @@ class ArollBeatTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(RuntimeError, "A-roll transcription produced no valid timed words"):
                     asr_beats.run(str(project), str(source), language="en")
+
+
+class ArollTimelineTests(unittest.TestCase):
+    def test_words_are_clipped_shifted_and_grouped_by_beat(self):
+        transcript = {"language": "en", "segments": [{"words": [
+            {"word": "before", "start": 0.0, "end": 0.2},
+            {"word": "first", "start": 1.0, "end": 1.4},
+            {"word": "boundary", "start": 2.8, "end": 3.2},
+            {"word": "second", "start": 5.2, "end": 5.7},
+        ]}]}
+        spans = [
+            {"beat": {"id": 1, "start": 1.0, "end": 3.0}, "output_start": 0.0, "dur": 2.0},
+            {"beat": {"id": 2, "start": 5.0, "end": 6.0}, "output_start": 2.0, "dur": 1.0},
+        ]
+
+        mapped = aroll_assemble.remap_source_transcript(transcript, spans)
+
+        self.assertEqual(mapped["language"], "en")
+        self.assertEqual(mapped["segments"][0]["beat_id"], 1)
+        self.assertEqual(mapped["segments"][0]["words"][0]["start"], 0.0)
+        self.assertEqual(mapped["segments"][0]["words"][-1]["end"], 2.0)
+        self.assertEqual(mapped["segments"][1]["words"][0]["start"], 2.2)
+
+    def test_non_finite_and_non_positive_mapped_ranges_are_ignored(self):
+        transcript = {"language": "en", "segments": [{"words": [
+            {"word": "nan", "start": math.nan, "end": 0.5},
+            {"word": "inf", "start": 0.5, "end": math.inf},
+            {"word": "negative", "start": -0.2, "end": 0.5},
+            {"word": "reversed", "start": 0.8, "end": 0.7},
+            {"word": "zero", "start": 0.9, "end": 0.9},
+            {"word": "valid", "start": 1.0, "end": 1.4},
+        ]}]}
+        spans = [{
+            "beat": {"id": 1, "start": 0.0, "end": 2.0},
+            "output_start": 0.0,
+            "dur": 2.0,
+        }]
+
+        mapped = aroll_assemble.remap_source_transcript(transcript, spans)
+
+        self.assertEqual(
+            [word["word"] for word in mapped["segments"][0]["words"]],
+            ["valid"],
+        )
+
+    def test_source_transcript_is_not_mutated_or_persisted_as_a_second_cache(self):
+        transcript = {"language": "el", "segments": [{"words": [
+            {"word": " alpha ", "start": 1.0, "end": 1.5},
+        ]}]}
+        original = json.loads(json.dumps(transcript))
+        spans = [{
+            "beat": {"id": "cut-a", "start": 1.0, "end": 2.0},
+            "output_start": 4.0,
+            "dur": 1.0,
+        }]
+
+        mapped = aroll_assemble.remap_source_transcript(transcript, spans)
+
+        self.assertEqual(transcript, original)
+        self.assertEqual(mapped["language"], "el")
+        self.assertEqual(mapped["segments"][0]["words"][0]["word"], " alpha ")
+        self.assertEqual(mapped["segments"][0]["words"][0]["start"], 4.0)
+        self.assertEqual(set(mapped), {"language", "segments"})
+
+    def test_generated_ass_has_only_positive_events_and_sensible_groups(self):
+        def ass_seconds(value):
+            hours, minutes, rest = value.split(":")
+            seconds, centiseconds = rest.split(".")
+            return (
+                int(hours) * 3600 + int(minutes) * 60 + int(seconds)
+                + int(centiseconds) / 100
+            )
+
+        transcript = {"language": "en", "segments": [{"words": [
+            {"word": "first", "start": 0.1, "end": 0.4},
+            {"word": "second", "start": 2.1, "end": 2.5},
+        ]}]}
+        spans = [
+            {"beat": {"id": 1, "start": 0.0, "end": 1.0}, "output_start": 0.0, "dur": 1.0},
+            {"beat": {"id": 2, "start": 2.0, "end": 3.0}, "output_start": 1.0, "dur": 1.0},
+        ]
+        mapped = aroll_assemble.remap_source_transcript(transcript, spans)
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "captions.ass"
+            self.assertTrue(generate_ass(mapped, output))
+            events = [
+                line for line in output.read_text(encoding="utf-8").splitlines()
+                if line.startswith("Dialogue:")
+            ]
+
+        self.assertEqual(len(events), 2)
+        self.assertIn("first", events[0])
+        self.assertNotIn("second", events[0])
+        self.assertIn("second", events[1])
+        for event in events:
+            fields = event.split(",", 3)
+            self.assertGreater(ass_seconds(fields[2]), ass_seconds(fields[1]))
 
 
 if __name__ == "__main__":
