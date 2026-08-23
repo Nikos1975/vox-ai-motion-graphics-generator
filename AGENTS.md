@@ -16,3 +16,6 @@ This repository is an **Agent Skill**: a self-contained workflow that turns a to
 - `MUAPI_API_KEY` in the environment — https://muapi.ai
 - `ffmpeg` + `ffprobe`
 - Python 3 with `Pillow`
+- For local word-timed captions in B-roll/C-roll: `python -m pip install -r requirements-captions.txt`
+
+See `references/captions.md` for caption modes, styles, local faster-whisper configuration, and fallback behavior.

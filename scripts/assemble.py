@@ -8,13 +8,17 @@ import subprocess
 import sys
 
 import text_overlay
+from captions import CaptionDependencyError, prepare_word_captions
+from captions.subtitle_utils import ffmpeg_filter_path
 
 FPS, TAIL = 24, 0.5
 WATERMARK = "Made with MuAPI · muapi-director"
 RES = {"16:9": (1920, 1080), "9:16": (1080, 1920), "1:1": (1080, 1080)}
 
+
 def ff(args):
     subprocess.run(["ffmpeg", "-y", "-loglevel", "error", *args], check=True)
+
 
 def probe_dur(path):
     out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
@@ -31,6 +35,56 @@ def shots_of(beat):
             yield s
     else:
         yield beat
+
+
+def _prepare_captions(project_dir, beat_spans, doc, width, height):
+    mode = str(doc.get("caption_mode", "word")).strip().lower()
+    if mode not in {"word", "static", "off"}:
+        raise ValueError("caption_mode must be one of: word, static, off")
+
+    if mode == "word":
+        try:
+            ass_path = prepare_word_captions(
+                project_dir,
+                beat_spans,
+                doc,
+                video_width=width,
+                video_height=height,
+            )
+            print(f"Word-timed captions -> {ass_path}")
+            return "word", ass_path
+        except CaptionDependencyError as exc:
+            if doc.get("caption_required", False):
+                raise
+            print(f"Word-timed captions unavailable ({exc}); falling back to static captions.")
+            return "static", None
+
+    return mode, None
+
+
+def _static_caption_inputs(project_dir, beat_spans, width, height, caption_style):
+    overlays = []
+    tmp = os.path.join(project_dir, "_seg")
+    for i, span in enumerate(beat_spans):
+        beat = span["beat"]
+        text = beat.get("narration", "")
+        if not text:
+            continue
+        caption_png = os.path.join(tmp, f"cap_{i:02d}.png")
+        keyframe = beat.get("keyframe_path") or (
+            beat.get("shots") and beat["shots"][0].get("keyframe_path")
+        )
+        accent = text_overlay.accent_color(keyframe) if keyframe else None
+        text_overlay.render_caption(
+            text,
+            caption_png,
+            W=width,
+            H=height,
+            accent=accent,
+            style=caption_style,
+        )
+        overlays.append((caption_png, span["start"], span["start"] + span["dur"]))
+    return overlays
 
 
 def run(project_dir):
@@ -126,44 +180,48 @@ def run(project_dir):
     ff(["-i", v_concat, *narr_inputs, "-filter_complex", full_filter,
         "-map", "[aout]", "-t", f"{total}", "-c:a", "aac", "-b:a", "192k", audio_full])
 
+    caption_mode, ass_path = _prepare_captions(project_dir, beat_spans, doc, W, H)
     cap_overlays = []
-    for i, span in enumerate(beat_spans):
-        b = span["beat"]
-        t_text = b.get("narration", "")
-        if not t_text:
-            continue
-        c_png = os.path.join(tmp, f"cap_{i:02d}.png")
-        kf_p = b.get("keyframe_path") or (b.get("shots") and b["shots"][0].get("keyframe_path"))
-        acc = text_overlay.accent_color(kf_p) if kf_p else None
-        text_overlay.render_caption(t_text, c_png, W=W, H=H, accent=acc, style=cap_style)
-        cap_overlays.append((c_png, span["start"], span["start"] + span["dur"]))
+    if caption_mode == "static":
+        cap_overlays = _static_caption_inputs(project_dir, beat_spans, W, H, cap_style)
 
     wm_png = os.path.join(tmp, "watermark.png")
     text_overlay.render_watermark(wm_text, wm_png, W=W, H=H)
 
-    v_in = ["-i", v_concat]
-    c_inputs = []
-    v_maps = ["[0:v]"]
+    inputs = ["-i", v_concat]
+    filter_parts = []
+    last_video = "[0:v]"
+    next_input_idx = 1
 
-    for i, (c_png, s_start, s_end) in enumerate(cap_overlays):
-        c_idx = i + 1
-        c_inputs.extend(["-i", c_png])
-        last_v = v_maps[-1]
-        out_v = f"[vcap{i+1}]"
-        v_maps.append(out_v)
-        v_in.extend(["-filter_complex", f"{last_v}[{c_idx}:v]overlay=0:0:enable='between(t,{s_start},{s_end})'{out_v}"])
+    if caption_mode == "word" and ass_path is not None:
+        ass_filter_path = ffmpeg_filter_path(str(ass_path))
+        filter_parts.append(f"{last_video}subtitles=filename='{ass_filter_path}'[vword]")
+        last_video = "[vword]"
 
-    wm_idx = len(cap_overlays) + 1
-    c_inputs.extend(["-i", wm_png])
-    last_v = v_maps[-1]
-    final_v = "[vfinal]"
-    fc_wm = f"{last_v}[{wm_idx}:v]overlay=0:0{final_v}"
+    for i, (caption_png, start, end) in enumerate(cap_overlays):
+        inputs.extend(["-i", caption_png])
+        out_label = f"[vcap{i + 1}]"
+        filter_parts.append(
+            f"{last_video}[{next_input_idx}:v]overlay=0:0:enable='between(t,{start},{end})'{out_label}"
+        )
+        last_video = out_label
+        next_input_idx += 1
 
+    inputs.extend(["-i", wm_png])
+    watermark_idx = next_input_idx
+    filter_parts.append(f"{last_video}[{watermark_idx}:v]overlay=0:0[vfinal]")
+    next_input_idx += 1
+
+    inputs.extend(["-i", audio_full])
+    audio_idx = next_input_idx
     final_mp4 = os.path.join(project_dir, "final.mp4")
-    ff([*v_in, *c_inputs, "-i", audio_full, "-filter_complex", fc_wm,
-        "-map", final_v, "-map", f"{wm_idx+1}:a", "-t", f"{total}",
+    ff([
+        *inputs,
+        "-filter_complex", ";".join(filter_parts),
+        "-map", "[vfinal]", "-map", f"{audio_idx}:a", "-t", f"{total}",
         "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p",
-        "-c:a", "copy", final_mp4])
+        "-c:a", "copy", final_mp4,
+    ])
 
     print(f"Assembly finished -> {final_mp4}")
 
