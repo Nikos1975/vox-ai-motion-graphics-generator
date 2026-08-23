@@ -49,6 +49,19 @@ class SourceTranscriptCacheTests(unittest.TestCase):
                 build_source_transcript(project, source)
             self.assertEqual(load_model.call_args.args, ("large-v3-turbo", "cpu", "int8"))
 
+    def test_light_cpu_profile_is_configurable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            project.mkdir()
+            source = Path(tmp) / "source.mp4"
+            source.write_bytes(b"source")
+            with patch("captions.transcription._load_model", return_value=object()) as load_model, patch(
+                "captions.transcription._transcribe_with_model",
+                return_value=self.transcript(),
+            ):
+                self.call(project, source, model_size="small", device="cpu", compute_type="int8")
+            self.assertEqual(load_model.call_args.args, ("small", "cpu", "int8"))
+
     def test_source_media_is_both_fingerprint_and_transcription_input(self):
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
@@ -82,6 +95,50 @@ class SourceTranscriptCacheTests(unittest.TestCase):
             self.assertEqual(first, second)
             self.assertEqual(path.read_bytes(), original)
 
+    def test_device_change_reuses_cache_without_retranscribing_or_rewriting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            project.mkdir()
+            source = Path(tmp) / "source.mp4"
+            source.write_bytes(b"same")
+            with patch("captions.transcription._load_model", return_value=object()) as load_model, patch(
+                "captions.transcription._transcribe_with_model",
+                return_value=self.transcript(),
+            ) as transcribe:
+                self.call(project, source, device="cpu")
+                path = project / "captions" / "transcript.json"
+                original = path.read_bytes()
+                self.call(project, source, device="auto")
+            self.assertEqual(load_model.call_count, 1)
+            self.assertEqual(transcribe.call_count, 1)
+            self.assertEqual(path.read_bytes(), original)
+
+    def test_empty_source_transcripts_are_not_persisted_or_reused(self):
+        empty_transcripts = [
+            {"language": "en", "segments": []},
+            {"language": "en", "segments": [{"words": []}]},
+        ]
+        for transcript in empty_transcripts:
+            with self.subTest(transcript=transcript), tempfile.TemporaryDirectory() as tmp:
+                project = Path(tmp) / "project"
+                project.mkdir()
+                source = Path(tmp) / "source.mp4"
+                source.write_bytes(b"source")
+                with patch("captions.transcription._load_model", return_value=object()), patch(
+                    "captions.transcription._transcribe_with_model",
+                    side_effect=[transcript, transcript],
+                ) as transcribe:
+                    with self.assertRaisesRegex(
+                        RuntimeError, "Transcription produced no valid canonical word timestamps"
+                    ):
+                        self.call(project, source)
+                    with self.assertRaisesRegex(
+                        RuntimeError, "Transcription produced no valid canonical word timestamps"
+                    ):
+                        self.call(project, source)
+                self.assertEqual(transcribe.call_count, 2)
+                self.assertFalse((project / "captions" / "transcript.json").exists())
+
     def test_source_content_change_invalidates_cache(self):
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
@@ -99,7 +156,7 @@ class SourceTranscriptCacheTests(unittest.TestCase):
 
     def test_model_language_and_compute_type_each_invalidate_cache(self):
         changes = [
-            ({}, {"model_size": "distil-small.en"}),
+            ({}, {"model_size": "small"}),
             ({}, {"language": "el"}),
             ({}, {"compute_type": "default"}),
         ]

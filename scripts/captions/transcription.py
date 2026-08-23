@@ -162,12 +162,13 @@ def _source_fingerprint(beat_spans: Iterable[dict[str, Any]]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _is_valid_cached_transcript(cached: Any) -> bool:
+def _is_valid_cached_transcript(cached: Any, *, require_words: bool = False) -> bool:
     if not isinstance(cached, dict) or cached.get("schema_version") != 1:
         return False
     segments = cached.get("segments")
     if not isinstance(segments, list):
         return False
+    has_words = False
     for segment in segments:
         if not isinstance(segment, dict) or not isinstance(segment.get("words"), list):
             return False
@@ -190,11 +191,15 @@ def _is_valid_cached_transcript(cached: Any) -> bool:
                 or end <= start
             ):
                 return False
-    return True
+            has_words = True
+    return has_words or not require_words
 
 
 def _read_cached_transcript(
-    transcript_path: Path, metadata: dict[str, Any]
+    transcript_path: Path,
+    metadata: dict[str, Any],
+    *,
+    require_words: bool = False,
 ) -> dict[str, Any] | None:
     if not transcript_path.exists():
         return None
@@ -202,7 +207,7 @@ def _read_cached_transcript(
         cached = json.loads(transcript_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    if not _is_valid_cached_transcript(cached):
+    if not _is_valid_cached_transcript(cached, require_words=require_words):
         return None
     if all(cached.get(key) == value for key, value in metadata.items()):
         return cached
@@ -230,7 +235,7 @@ def build_source_transcript(
         "requested_language": language,
         "compute_type": compute_type,
     }
-    cached = _read_cached_transcript(transcript_path, metadata)
+    cached = _read_cached_transcript(transcript_path, metadata, require_words=True)
     if cached is not None:
         return cached
 
@@ -241,7 +246,7 @@ def build_source_transcript(
         lambda model: _transcribe_with_model(model, source, language),
     )
     transcript.update(metadata)
-    if not _is_valid_cached_transcript(transcript):
+    if not _is_valid_cached_transcript(transcript, require_words=True):
         raise RuntimeError("Transcription produced no valid canonical word timestamps")
     transcript_path.parent.mkdir(parents=True, exist_ok=True)
     transcript_path.write_text(
