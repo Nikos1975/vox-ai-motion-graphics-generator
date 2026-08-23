@@ -2,6 +2,7 @@ import sys
 import tempfile
 import unittest
 import json
+import math
 from pathlib import Path
 from unittest.mock import patch
 
@@ -280,6 +281,38 @@ class TranscriptCacheTests(unittest.TestCase):
                 build_timeline_transcript(project, spans)
 
             self.assertEqual(transcribe.call_count, 2)
+
+    def test_malformed_canonical_segment_fields_are_recovered_for_broll_and_croll(self):
+        cases = {
+            "missing language": lambda transcript: transcript.pop("language"),
+            "non-string language": lambda transcript: transcript.__setitem__("language", 7),
+            "missing segment start": lambda transcript: transcript["segments"][0].pop("start"),
+            "invalid segment start": lambda transcript: transcript["segments"][0].__setitem__("start", "bad"),
+            "nonfinite segment start": lambda transcript: transcript["segments"][0].__setitem__("start", math.nan),
+            "negative segment start": lambda transcript: transcript["segments"][0].__setitem__("start", -0.1),
+            "missing segment end": lambda transcript: transcript["segments"][0].pop("end"),
+            "invalid segment end": lambda transcript: transcript["segments"][0].__setitem__("end", "bad"),
+            "nonfinite segment end": lambda transcript: transcript["segments"][0].__setitem__("end", math.inf),
+            "negative segment end": lambda transcript: transcript["segments"][0].__setitem__("end", -0.1),
+            "reversed segment times": lambda transcript: transcript["segments"][0].update(start=0.4, end=0.1),
+            "non-string segment text": lambda transcript: transcript["segments"][0].__setitem__("text", 7),
+        }
+        for name, mutate in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                project = Path(tmp)
+                audio = project / "a.mp3"
+                audio.write_bytes(b"audio")
+                spans = self._spans(audio)
+                with patch("captions.transcription._load_model", return_value=object()), patch(
+                    "captions.transcription._transcribe_with_model", return_value=self._transcript()
+                ) as transcribe:
+                    first = build_timeline_transcript(project, spans)
+                    mutate(first)
+                    (project / "captions" / "transcript.json").write_text(
+                        json.dumps(first), encoding="utf-8"
+                    )
+                    build_timeline_transcript(project, spans)
+                self.assertEqual(transcribe.call_count, 2)
 
     def test_compute_type_change_invalidates_cache(self):
         with tempfile.TemporaryDirectory() as tmp:

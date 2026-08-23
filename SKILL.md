@@ -23,7 +23,8 @@ Turn a topic, talking-head video, or photo into a finished **Vox-style paper-col
 - `MUAPI_API_KEY` set in your environment (get one from https://muapi.ai).
 - `ffmpeg` + `ffprobe` installed on system path.
 - Python 3 with `Pillow` (`pip install pillow`).
-- For default word-timed B-roll/C-roll captions, install `faster-whisper` with `python -m pip install -r requirements-captions.txt`. If it is absent, assembly falls back to legacy static captions unless `"caption_required": true`.
+- A-roll requires `faster-whisper` for `asr_beats.py`: install it with `python -m pip install -r requirements-captions.txt` before creating A-roll beats.
+- B-roll/C-roll use `faster-whisper` for their default word-timed captions. If it is absent, B-roll/C-roll assembly falls back to legacy static captions unless `"caption_required": true`.
 
 ## Workflow Steps
 
@@ -36,9 +37,9 @@ Turn a topic, talking-head video, or photo into a finished **Vox-style paper-col
 6. `python3 scripts/assemble.py out/<project>` (Muxes audio, ducking, word-timed captions when available, watermark -> `final.mp4`).
 
 ### A-roll Mode (Talking Head)
-1. `python3 scripts/asr_beats.py out/<project> <source.mp4>`
+1. `python3 scripts/asr_beats.py out/<project> <source.mp4>` — hashes and transcribes the original source media once with local faster-whisper, saves the canonical `captions/transcript.json`, and writes `beats.json` with `"caption_mode": "word"`.
 2. `python3 scripts/aroll_clips.py out/<project>`
-3. `python3 scripts/aroll_assemble.py out/<project>`
+3. `python3 scripts/aroll_assemble.py out/<project>` — reuses that transcript to map source word timestamps onto the successful final edit timeline, renders ASS captions, and preserves original source-audio segments.
 
 ### C-roll Mode (Photo Anchor)
 1. Add `"mode": "croll"`, `"anchor_photo": "photo.png"`, `"croll_subject": "portrait"|"product"` to `beats.json`.
@@ -50,3 +51,7 @@ Turn a topic, talking-head video, or photo into a finished **Vox-style paper-col
 ## Captions
 
 B-roll/C-roll assembly defaults to `"caption_mode": "word"`. Narration audio is transcribed locally with faster-whisper, mapped onto the final beat timeline, rendered as ASS word-highlight captions, and burned by ffmpeg/libass. Use `"caption_mode": "static"` for the previous whole-beat PNG captions or `"caption_mode": "off"` to disable captions. See `references/captions.md` for styles and configuration.
+
+A-roll accepts `"caption_mode": "word"` or `"caption_mode": "off"`; generated A-roll projects explicitly use `word`, while legacy A-roll projects with no mode remain `off`. A-roll reuses the canonical source transcript created by `asr_beats.py`; assembly does not perform a second transcription or fabricate timestamps. The shared styles are `editorial`, `classic`, `hormozi`, `mrbeast`, `karaoke`, `minimal`, and `bounce`, with `white` and `paper` retained as aliases.
+
+For A-roll, the operational multilingual default is `small` / `cpu` / `int8`; select the configurable accurate profile with `--model large-v3-turbo --device cpu --compute-type int8`. On a 15.583333 s fixture, warm uncached transcription took 6.198 s (RTF 0.398) with small versus 17.496 s (RTF 1.123) with large—2.82x slower—while cold-run observed peaks were at least 519 MiB and 1.64 GiB. Both produced the expected 20 monotonic words in 3 segments. An English-only Distil-Whisper model may be explicitly selected through faster-whisper with CPU/int8, but is not the multilingual default. Model, device, and compute type are configurable, and no profile depends on a 2 GB GPU. This workflow does not add original `openai-whisper`, Qwen3-ASR, `whisper.cpp`, `llama.cpp`, vLLM, bitsandbytes, YouTube ingestion, `pytube`, or `yt-dlp`; `source_audio_url` is not used.
