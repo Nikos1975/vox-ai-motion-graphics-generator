@@ -37,6 +37,21 @@ def _is_missing_cuda_runtime(exc: RuntimeError) -> bool:
     return missing_library and load_failure
 
 
+def _transcribe_with_fallback(
+    model_size: str,
+    device: str,
+    compute_type: str,
+    operation: Callable[[Any], dict[str, Any]],
+) -> dict[str, Any]:
+    try:
+        return operation(_load_model(model_size, device, compute_type))
+    except RuntimeError as exc:
+        if device.strip().lower() != "auto" or not _is_missing_cuda_runtime(exc):
+            raise
+        print("Word-timed captions: CUDA runtime unavailable; retrying transcription on CPU.")
+        return operation(_load_model(model_size, "cpu", compute_type))
+
+
 def _transcribe_with_model(model: Any, audio_path: Path, language: str | None) -> dict[str, Any]:
     segments_iter, info = model.transcribe(
         str(audio_path),
@@ -157,16 +172,83 @@ def _is_valid_cached_transcript(cached: Any) -> bool:
         if not isinstance(segment, dict) or not isinstance(segment.get("words"), list):
             return False
         for word in segment["words"]:
-            if not isinstance(word, dict) or not isinstance(word.get("word"), str):
+            if (
+                not isinstance(word, dict)
+                or not isinstance(word.get("word"), str)
+                or not word["word"].strip()
+            ):
                 return False
             try:
                 start = float(word["start"])
                 end = float(word["end"])
             except (KeyError, TypeError, ValueError):
                 return False
-            if not math.isfinite(start) or not math.isfinite(end):
+            if (
+                not math.isfinite(start)
+                or not math.isfinite(end)
+                or start < 0
+                or end <= start
+            ):
                 return False
     return True
+
+
+def _read_cached_transcript(
+    transcript_path: Path, metadata: dict[str, Any]
+) -> dict[str, Any] | None:
+    if not transcript_path.exists():
+        return None
+    try:
+        cached = json.loads(transcript_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not _is_valid_cached_transcript(cached):
+        return None
+    if all(cached.get(key) == value for key, value in metadata.items()):
+        return cached
+    return None
+
+
+def build_source_transcript(
+    project_dir: str | Path,
+    source_path: str | Path,
+    *,
+    language: str | None = None,
+    model_size: str = "small",
+    device: str = "cpu",
+    compute_type: str = "int8",
+) -> dict[str, Any]:
+    project = Path(project_dir)
+    source = Path(source_path)
+    if not source.is_file():
+        raise FileNotFoundError(f"A-roll source media not found: {source}")
+    transcript_path = project / "captions" / "transcript.json"
+    metadata = {
+        "schema_version": 1,
+        "source_fingerprint": _sha256_file(source),
+        "model": model_size,
+        "requested_language": language,
+        "compute_type": compute_type,
+    }
+    cached = _read_cached_transcript(transcript_path, metadata)
+    if cached is not None:
+        return cached
+
+    transcript = _transcribe_with_fallback(
+        model_size,
+        device,
+        compute_type,
+        lambda model: _transcribe_with_model(model, source, language),
+    )
+    transcript.update(metadata)
+    if not _is_valid_cached_transcript(transcript):
+        raise RuntimeError("Transcription produced no valid canonical word timestamps")
+    transcript_path.parent.mkdir(parents=True, exist_ok=True)
+    transcript_path.write_text(
+        json.dumps(transcript, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return transcript
 
 
 def build_timeline_transcript(
@@ -179,24 +261,18 @@ def build_timeline_transcript(
     compute_type: str = "default",
 ) -> dict[str, Any]:
     project = Path(project_dir)
-    caption_dir = project / "captions"
-    caption_dir.mkdir(parents=True, exist_ok=True)
-    transcript_path = caption_dir / "transcript.json"
+    transcript_path = project / "captions" / "transcript.json"
     fingerprint = _source_fingerprint(beat_spans)
-
-    if transcript_path.exists():
-        try:
-            cached = json.loads(transcript_path.read_text(encoding="utf-8"))
-            if (
-                _is_valid_cached_transcript(cached)
-                and cached.get("source_fingerprint") == fingerprint
-                and cached.get("model") == model_size
-                and cached.get("requested_language") == language
-                and cached.get("compute_type") == compute_type
-            ):
-                return cached
-        except (OSError, json.JSONDecodeError):
-            pass
+    metadata = {
+        "schema_version": 1,
+        "source_fingerprint": fingerprint,
+        "model": model_size,
+        "requested_language": language,
+        "compute_type": compute_type,
+    }
+    cached = _read_cached_transcript(transcript_path, metadata)
+    if cached is not None:
+        return cached
 
     def transcribe_with(model: Any) -> dict[str, Any]:
         def transcribe_one(audio_path: Path) -> dict[str, Any]:
@@ -204,22 +280,9 @@ def build_timeline_transcript(
 
         return merge_beat_transcripts(beat_spans, transcribe_one, language=language)
 
-    try:
-        merged = transcribe_with(_load_model(model_size, device, compute_type))
-    except RuntimeError as exc:
-        if device.strip().lower() != "auto" or not _is_missing_cuda_runtime(exc):
-            raise
-        print("Word-timed captions: CUDA runtime unavailable; retrying transcription on CPU.")
-        merged = transcribe_with(_load_model(model_size, "cpu", compute_type))
-    merged.update(
-        {
-            "schema_version": 1,
-            "source_fingerprint": fingerprint,
-            "model": model_size,
-            "requested_language": language,
-            "compute_type": compute_type,
-        }
-    )
+    merged = _transcribe_with_fallback(model_size, device, compute_type, transcribe_with)
+    merged.update(metadata)
+    transcript_path.parent.mkdir(parents=True, exist_ok=True)
     transcript_path.write_text(
         json.dumps(merged, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
