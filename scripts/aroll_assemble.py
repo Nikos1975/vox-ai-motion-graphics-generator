@@ -104,14 +104,13 @@ def remap_source_transcript(transcript, edit_spans):
                 continue
             words.append({"word": text, "start": mapped_start, "end": mapped_end})
 
-        if words:
-            mapped_segments.append({
-                "beat_id": beat.get("id"),
-                "start": output_start,
-                "end": output_end,
-                "text": " ".join(word["word"] for word in words),
-                "words": words,
-            })
+        mapped_segments.append({
+            "beat_id": beat.get("id"),
+            "start": output_start,
+            "end": output_end,
+            "text": " ".join(word["word"] for word in words),
+            "words": words,
+        })
 
     return {"language": language, "segments": mapped_segments}
 

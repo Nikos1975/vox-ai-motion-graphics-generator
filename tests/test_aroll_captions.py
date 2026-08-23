@@ -365,6 +365,27 @@ class ArollTimelineTests(unittest.TestCase):
             ["valid"],
         )
 
+    def test_included_beat_without_valid_overlapping_words_keeps_empty_segment(self):
+        transcript = {"language": "en", "segments": [{"words": [
+            {"word": "outside", "start": 4.0, "end": 4.5},
+            {"word": "invalid", "start": 1.0, "end": 1.0},
+        ]}]}
+        spans = [{
+            "beat": {"id": "silent-cut", "start": 1.0, "end": 2.0},
+            "output_start": 3.0,
+            "dur": 1.0,
+        }]
+
+        mapped = aroll_assemble.remap_source_transcript(transcript, spans)
+
+        self.assertEqual(mapped["segments"], [{
+            "beat_id": "silent-cut",
+            "start": 3.0,
+            "end": 4.0,
+            "text": "",
+            "words": [],
+        }])
+
     def test_source_transcript_is_not_mutated_or_persisted_as_a_second_cache(self):
         transcript = {"language": "el", "segments": [{"words": [
             {"word": " alpha ", "start": 1.0, "end": 1.5},
