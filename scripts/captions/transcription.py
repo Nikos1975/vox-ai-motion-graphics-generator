@@ -170,12 +170,31 @@ def _source_fingerprint(beat_spans: Iterable[dict[str, Any]]) -> str:
 def _is_valid_cached_transcript(cached: Any, *, require_words: bool = False) -> bool:
     if not isinstance(cached, dict) or cached.get("schema_version") != 1:
         return False
+    language = cached.get("language")
+    if not isinstance(language, str) or not language.strip():
+        return False
     segments = cached.get("segments")
     if not isinstance(segments, list):
         return False
     has_words = False
     for segment in segments:
-        if not isinstance(segment, dict) or not isinstance(segment.get("words"), list):
+        if (
+            not isinstance(segment, dict)
+            or not isinstance(segment.get("text"), str)
+            or not isinstance(segment.get("words"), list)
+        ):
+            return False
+        try:
+            segment_start = float(segment["start"])
+            segment_end = float(segment["end"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        if (
+            not math.isfinite(segment_start)
+            or not math.isfinite(segment_end)
+            or segment_start < 0
+            or segment_end <= segment_start
+        ):
             return False
         for word in segment["words"]:
             if (

@@ -7,6 +7,7 @@ import math
 import os
 import subprocess
 import sys
+from decimal import Decimal, ROUND_DOWN
 from pathlib import Path
 
 from captions.transcription import (
@@ -40,6 +41,13 @@ def _finite_number(value):
     except (TypeError, ValueError):
         return None
     return number if math.isfinite(number) else None
+
+
+def _encoded_cut_duration(value):
+    duration = _finite_number(value)
+    if duration is None or duration <= 0:
+        return 0.0
+    return float(Decimal(str(duration)).quantize(Decimal("0.01"), rounding=ROUND_DOWN))
 
 
 def remap_source_transcript(transcript, edit_spans):
@@ -172,15 +180,31 @@ def run(project_dir):
         if not clip or not os.path.exists(clip):
             print(f"[{beat['id']}] no generated clip -- skipped")
             continue
-        audio_path = os.path.join(tmp, f"audio_{beat['id']}.aac")
-        ff(["-ss", f"{beat['start']:.2f}", "-i", src, "-t", f"{beat['dur']:.2f}",
+        requested_dur = _encoded_cut_duration(beat.get("dur"))
+        source_start = _finite_number(beat.get("start"))
+        source_end = _finite_number(beat.get("end"))
+        if (
+            requested_dur <= 0
+            or source_start is None
+            or source_end is None
+            or source_start < 0
+            or source_end <= source_start
+        ):
+            print(f"[{beat['id']}] requested duration rounded to zero -- skipped")
+            continue
+        source_cut_dur = _encoded_cut_duration(min(requested_dur, source_end - source_start))
+        if source_cut_dur <= 0:
+            print(f"[{beat['id']}] source cut duration rounded to zero -- skipped")
+            continue
+        audio_path = os.path.join(tmp, f"audio_{beat['id']}.m4a")
+        ff(["-ss", str(source_start), "-i", src, "-t", f"{source_cut_dur:.2f}",
             "-vn", "-c:a", "aac", audio_path])
-        vd, ad = probe_dur(clip), probe_dur(audio_path)
-        d = min(vd, ad) if vd and ad else (vd or ad)
-        if not d:
+        vd = _finite_number(probe_dur(clip))
+        ad = _finite_number(probe_dur(audio_path))
+        if vd is None or ad is None or vd <= 0 or ad <= 0:
             print(f"[{beat['id']}] couldn't probe duration -- skipped")
             continue
-        encoded_dur = round(d, 2)
+        encoded_dur = _encoded_cut_duration(min(source_cut_dur, vd, ad))
         if encoded_dur <= 0:
             print(f"[{beat['id']}] encoded duration rounded to zero -- skipped")
             continue
@@ -202,8 +226,9 @@ def run(project_dir):
         for m in muxed:
             f.write(ffconcat_file_line(m))
     final = os.path.join(project_dir, "final.mp4")
+    total = sum(span["dur"] for span in edit_spans)
     if caption_mode == "off":
-        ff(["-f", "concat", "-safe", "0", "-i", listf, "-c", "copy", final])
+        ff(["-f", "concat", "-safe", "0", "-i", listf, "-t", f"{total:.2f}", "-c", "copy", final])
         print("FINAL:", final, f"({len(muxed)}/{len(doc['beats'])} beats)")
         return
 
@@ -222,7 +247,6 @@ def run(project_dir):
     )
     if not created:
         raise RuntimeError("A-roll caption transcript produced no caption events")
-    total = sum(span["dur"] for span in edit_spans)
     ass_filter_path = ffmpeg_filter_path(str(ass_path))
     ff([
         "-i", concat_path,

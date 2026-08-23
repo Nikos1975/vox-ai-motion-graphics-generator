@@ -2,6 +2,8 @@ import hashlib
 import ast
 import json
 import math
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -240,6 +242,40 @@ class SourceTranscriptCacheTests(unittest.TestCase):
                         cached = json.loads(path.read_text(encoding="utf-8"))
                         cached["segments"][0]["words"] = [invalid_word]
                         path.write_text(json.dumps(cached), encoding="utf-8")
+                    self.call(project, source)
+                self.assertEqual(transcribe.call_count, 2)
+
+    def test_malformed_canonical_fields_are_retranscribed_and_rejected_by_read_only_loader(self):
+        cases = {
+            "missing language": lambda transcript: transcript.pop("language"),
+            "non-string language": lambda transcript: transcript.__setitem__("language", 7),
+            "missing segment start": lambda transcript: transcript["segments"][0].pop("start"),
+            "invalid segment start": lambda transcript: transcript["segments"][0].__setitem__("start", "bad"),
+            "nonfinite segment start": lambda transcript: transcript["segments"][0].__setitem__("start", math.nan),
+            "negative segment start": lambda transcript: transcript["segments"][0].__setitem__("start", -0.1),
+            "missing segment end": lambda transcript: transcript["segments"][0].pop("end"),
+            "invalid segment end": lambda transcript: transcript["segments"][0].__setitem__("end", "bad"),
+            "nonfinite segment end": lambda transcript: transcript["segments"][0].__setitem__("end", math.inf),
+            "negative segment end": lambda transcript: transcript["segments"][0].__setitem__("end", -0.1),
+            "reversed segment times": lambda transcript: transcript["segments"][0].update(start=0.8, end=0.1),
+            "non-string segment text": lambda transcript: transcript["segments"][0].__setitem__("text", 7),
+        }
+        for name, mutate in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                project = Path(tmp) / "project"
+                project.mkdir()
+                source = Path(tmp) / "source.mp4"
+                source.write_bytes(b"source")
+                with patch("captions.transcription._load_model", return_value=object()), patch(
+                    "captions.transcription._transcribe_with_model",
+                    return_value=self.transcript(),
+                ) as transcribe:
+                    self.call(project, source)
+                    path = project / "captions" / "transcript.json"
+                    cached = json.loads(path.read_text(encoding="utf-8"))
+                    mutate(cached)
+                    path.write_text(json.dumps(cached), encoding="utf-8")
+                    self.assertIsNone(load_cached_source_transcript(project, source, language="en"))
                     self.call(project, source)
                 self.assertEqual(transcribe.call_count, 2)
 
@@ -526,9 +562,12 @@ class ArollAssemblyTests(unittest.TestCase):
             "model": doc["caption_whisper_model"],
             "requested_language": doc["language"],
             "compute_type": doc["caption_whisper_compute_type"],
-            "language": "en", "segments": [{"words": words or [
-                {"word": "hello", "start": 1.1, "end": 1.5},
-            ]}],
+            "language": "en", "segments": [{
+                "start": 1.0,
+                "end": 2.0,
+                "text": "hello",
+                "words": words or [{"word": "hello", "start": 1.1, "end": 1.5}],
+            }],
         }
         transcript.update(overrides)
         (caption_dir / "transcript.json").write_text(json.dumps(transcript), encoding="utf-8")
@@ -668,6 +707,101 @@ class ArollAssemblyTests(unittest.TestCase):
             [segment["start"] for segment in generate.call_args.args[0]["segments"]], [0.0, 1.0]
         )
         self.assertEqual(calls[-1][calls[-1].index("-t") + 1], "2.00")
+
+    def test_requested_beat_cut_bounds_audio_mux_spans_and_final_total(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = self.make_project(tmp, "word")
+            doc_path = project / "beats.json"
+            doc = json.loads(doc_path.read_text(encoding="utf-8"))
+            doc["beats"].append({
+                "id": 2, "start": 3.0, "end": 4.0, "dur": 1.0,
+                "narration": "second", "clip_path": doc["beats"][0]["clip_path"],
+            })
+            doc_path.write_text(json.dumps(doc), encoding="utf-8")
+            self.write_transcript(project, [
+                {"word": "first", "start": 1.1, "end": 1.5},
+                {"word": "second", "start": 3.1, "end": 3.5},
+            ])
+            calls, generate = self.run_captured(project, durations=[2.0] * 4)
+
+        extraction_calls = [call for call in calls if "-vn" in call]
+        mux_calls = [call for call in calls if "1:a:0" in call]
+        self.assertEqual([call[call.index("-t") + 1] for call in extraction_calls], ["1.00", "1.00"])
+        self.assertTrue(all(call[-1].endswith(".m4a") for call in extraction_calls))
+        self.assertEqual([call[call.index("-t") + 1] for call in mux_calls], ["1.00", "1.00"])
+        self.assertEqual(
+            [segment["start"] for segment in generate.call_args.args[0]["segments"]], [0.0, 1.0]
+        )
+        self.assertEqual(calls[-1][calls[-1].index("-t") + 1], "2.00")
+
+    def test_off_mode_final_is_bounded_by_requested_encoded_cut(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = self.make_project(tmp, "off")
+            calls, _generate = self.run_captured(project, durations=[2.0, 2.0])
+        final_call = calls[-1]
+        self.assertIn("-t", final_call)
+        self.assertEqual(final_call[final_call.index("-t") + 1], "1.00")
+
+    def test_centisecond_requested_cut_is_not_shortened_by_binary_float_rounding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = self.make_project(tmp, "off")
+            doc_path = project / "beats.json"
+            doc = json.loads(doc_path.read_text(encoding="utf-8"))
+            doc["beats"][0].update(end=1.29, dur=0.29)
+            doc_path.write_text(json.dumps(doc), encoding="utf-8")
+            calls, _generate = self.run_captured(project, durations=[2.0, 2.0])
+        extraction_call = next(call for call in calls if "-vn" in call)
+        mux_call = next(call for call in calls if "1:a:0" in call)
+        self.assertEqual(extraction_call[extraction_call.index("-t") + 1], "0.29")
+        self.assertEqual(mux_call[mux_call.index("-t") + 1], "0.29")
+        self.assertEqual(calls[-1][calls[-1].index("-t") + 1], "0.29")
+
+    def test_source_cut_uses_exact_start_and_does_not_cross_beat_end(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = self.make_project(tmp, "off")
+            doc_path = project / "beats.json"
+            doc = json.loads(doc_path.read_text(encoding="utf-8"))
+            doc["beats"][0].update(start=1.006, end=2.005, dur=1.0)
+            doc_path.write_text(json.dumps(doc), encoding="utf-8")
+            calls, _generate = self.run_captured(project, durations=[2.0, 2.0])
+        extraction_call = next(call for call in calls if "-vn" in call)
+        mux_call = next(call for call in calls if "1:a:0" in call)
+        self.assertEqual(extraction_call[extraction_call.index("-ss") + 1], "1.006")
+        self.assertEqual(extraction_call[extraction_call.index("-t") + 1], "0.99")
+        self.assertEqual(mux_call[mux_call.index("-t") + 1], "0.99")
+
+    def test_unprobeable_clip_or_audio_skips_the_beat(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = self.make_project(tmp, "off")
+            with self.assertRaisesRegex(SystemExit, "No beats had a generated clip"):
+                self.run_captured(project, durations=[2.0, 0.0])
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg and ffprobe required")
+    def test_real_ffmpeg_m4a_extract_does_not_extend_requested_cut(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            project.mkdir()
+            source = project / "source.mp4"
+            subprocess.run([
+                "ffmpeg", "-y", "-loglevel", "error",
+                "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=24",
+                "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+                "-t", "2", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(source),
+            ], check=True)
+            (project / "beats.json").write_text(json.dumps({
+                "mode": "aroll",
+                "source_video": str(source),
+                "aspect": "tiny",
+                "caption_mode": "off",
+                "beats": [{
+                    "id": 1, "start": 0.0, "end": 1.0, "dur": 1.0,
+                    "clip_path": str(source),
+                }],
+            }), encoding="utf-8")
+            with patch.dict(aroll_assemble.RES, {"tiny": (64, 64)}):
+                aroll_assemble.run(str(project))
+            # AAC can expose one final 1024-sample encoder frame in the container duration.
+            self.assertLessEqual(aroll_assemble.probe_dur(project / "final.mp4"), 1.03)
 
     def test_unknown_caption_mode_fails(self):
         with self.assertRaisesRegex(ValueError, "word, off"):
