@@ -2,7 +2,7 @@
 
 ## Scope
 
-Add word-timed captions to the existing A-roll pipeline by sharing the canonical faster-whisper transcript and ASS renderer already used by B-roll and C-roll. A-roll must transcribe its source once, reuse that persisted transcript for both beat segmentation and captions, preserve source audio and existing visual editing, and support `caption_mode` values `word` and `off`.
+Add word-timed captions to the existing A-roll pipeline by sharing the canonical faster-whisper transcript and ASS renderer already used by B-roll and C-roll. A-roll must transcribe its source once, reuse that persisted transcript for both beat segmentation and captions, preserve source audio and existing visual editing, and support `caption_mode` values `word` and `off`. Newly generated A-roll projects explicitly write `"caption_mode": "word"`; legacy A-roll projects with no `caption_mode` assemble as `off` so their prior output behavior remains unchanged.
 
 This change does not add YouTube URL ingestion, `pytube`, `yt-dlp`, playlist or channel handling, new production configuration, new caption styles, or unrelated B-roll/C-roll refactoring. It does not change A-roll watermark behavior.
 
@@ -14,7 +14,7 @@ This change does not add YouTube URL ingestion, `pytube`, `yt-dlp`, playlist or 
 
 ## Chosen Architecture
 
-Narrowly generalize `scripts/captions/transcription.py` with a source-file transcript builder. The builder accepts the A-roll source audio or video directly, invokes the existing faster-whisper loading, word timestamp extraction, and automatic CUDA-to-CPU fallback code, validates the result, and persists the canonical transcript at:
+Narrowly generalize `scripts/captions/transcription.py` with a source-file transcript builder. The builder accepts the original A-roll source media directly, invokes the existing faster-whisper loading, word timestamp extraction, and automatic CUDA-to-CPU fallback code, validates the result, and persists the canonical transcript at:
 
 ```text
 out/<project>/captions/transcript.json
@@ -40,18 +40,18 @@ The semantic transcript remains:
 
 Cache metadata surrounds, but does not alter, these semantics. `scripts/asr_beats.py` calls this builder once and derives its beats from the returned transcript. `scripts/aroll_assemble.py` reads the same persisted transcript; it never calls a transcriber. It maps source-relative words into the concatenated edit timeline in memory, assigns beat identifiers to prevent inappropriate grouping across cuts, and passes that derived view directly to the existing `generate_ass()` renderer. No second transcript file is written.
 
-Local faster-whisper becomes the canonical A-roll ASR. The existing MuAPI Whisper path is superseded rather than retained as a second backend because it adds a paid remote request, has an incompatible provider result contract, and would reintroduce parallel transcription behavior. MuAPI remains unchanged for A-roll visual generation.
+Local faster-whisper becomes the canonical A-roll ASR. The existing MuAPI Whisper path is superseded rather than retained as a second backend because it adds a paid remote request, has an incompatible provider result contract, and would reintroduce parallel transcription behavior. The former `source_audio_url` field is not preserved because neither `aroll_clips.py` nor `aroll_assemble.py` consumes it. MuAPI remains unchanged for A-roll visual generation.
 
 ## Source Transcript Cache
 
 The source transcript cache identity includes:
 
-- SHA-256 of source audio/video content
+- SHA-256 of the original source-media content passed to faster-whisper
 - Whisper model
 - requested language
 - compute type
 
-The execution device is excluded because it does not request different transcript semantics. A valid unchanged cache is returned without rewriting the file. Changed source content, model, language, or compute type invalidates it. Invalid JSON, missing required structure, malformed timing, non-finite timing, negative timing, or `end <= start` causes retranscription.
+The original `source_video` or source-media path is both the faster-whisper input and the SHA-256 fingerprint input, so the cached identity always describes the bytes that were transcribed. `_source_audio.mp3` is not extracted, regenerated, or retained unless real implementation testing proves direct source-media transcription cannot satisfy the workflow. The execution device is excluded because it does not request different transcript semantics. A valid unchanged cache is returned without rewriting the file. Changed source content, model, language, or compute type invalidates it. Invalid JSON, missing required structure, malformed timing, non-finite timing, negative timing, or `end <= start` causes retranscription.
 
 The source builder reuses the existing `_load_model()`, `_transcribe_with_model()`, missing-CUDA detection, and CPU fallback logic. Shared helpers may be narrowed or generalized to avoid duplicated cache and validation code, but the B-roll/C-roll timeline transcript behavior and cache identity remain compatible.
 
@@ -80,9 +80,9 @@ This mapping preserves genuine within-source word timing and performs no text-ba
 
 `scripts/aroll_assemble.py` keeps its existing per-beat original-audio extraction and visual scaling/cropping/fps behavior. It records deterministic output segment spans while muxing. The concat result remains the basis of `final.mp4`.
 
-For `caption_mode=word` (the default), assembly loads `captions/transcript.json`, creates the edit-timeline view, writes `captions/captions.ass` using the shared renderer and requested `caption_style` / `caption_position`, and burns it into the concatenated video with ffmpeg/libass. The subtitles filter uses the shared `ffmpeg_filter_path()` helper so Windows drive letters, spaces, and apostrophes are safe. The final encode maps video from the filtered concat and audio from the concatenated A-roll source-audio track exactly once.
+For explicit `caption_mode=word`, assembly loads `captions/transcript.json`, creates the edit-timeline view, writes `captions/captions.ass` using the shared renderer and requested `caption_style` / `caption_position`, and burns it into the concatenated video with ffmpeg/libass. Newly generated `beats.json` files explicitly select this mode. The subtitles filter uses the shared `ffmpeg_filter_path()` helper so Windows drive letters, spaces, and apostrophes are safe. The final encode maps video from the filtered concat and audio from the concatenated A-roll source-audio track exactly once.
 
-For `caption_mode=off`, assembly skips transcript loading, ASS generation, and the subtitle filter. A-roll has no existing static caption mode, so this design does not introduce one. Unsupported modes fail with a clear `ValueError`.
+For explicit `caption_mode=off`, assembly skips transcript loading, ASS generation, and the subtitle filter. A missing `caption_mode` is also treated as `off` for compatibility with A-roll projects created before caption support. A-roll has no existing static caption mode, so this design does not introduce one. Unsupported modes fail with a clear `ValueError`.
 
 The final mapping explicitly preserves one audio stream derived from the source recording. Caption filtering changes only video. Output duration is bounded to the assembled segment timeline so captions cannot extend or truncate audio. Existing behavior for missing generated clips and the absence of an A-roll watermark remains unchanged.
 
