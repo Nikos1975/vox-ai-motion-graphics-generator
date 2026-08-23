@@ -665,9 +665,10 @@ parsed A-roll `start`, `end`, and requested duration to centiseconds with
 round-half-up before calculating the source interval, then safely floors the
 encoded duration. It rejects effective cuts shorter than one second; that is a
 narrow 24-fps/AAC rendering constraint, while normal ASR beats remain at least
-two seconds. Accepted cuts use lossless PCM WAV audio. Video-only H.264
-segments are allocated frames from the cumulative PCM-audio timeline on the
-global 24-fps grid, then video and PCM audio are concatenated separately.
+two seconds. Accepted cuts use lossless PCM WAV audio, trimmed to the effective
+encoded duration before concatenation. Video-only H.264 segments are allocated
+frames from the cumulative PCM-audio timeline on the global 24-fps grid, then
+video and PCM audio are concatenated separately.
 Finalization AAC-encodes the single original-speech stream once and
 stream-copies the `off` video; `word` re-encodes only its subtitle-filtered
 video. No silence, mix, or duplicate speech stream is introduced. Probe

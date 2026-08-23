@@ -769,6 +769,34 @@ class ArollAssemblyTests(unittest.TestCase):
         self.assertTrue(all("-an" in call for call in video_calls))
         self.assertTrue(any(call[-1].endswith("aroll_audio.wav") for call in calls))
 
+    def test_pcm_concat_trims_each_beat_to_its_effective_timeline_duration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = self.make_project(tmp, "word")
+            doc_path = project / "beats.json"
+            doc = json.loads(doc_path.read_text(encoding="utf-8"))
+            doc["beats"].append({
+                "id": 2, "start": 3.0, "end": 5.0, "dur": 2.0,
+                "clip_path": doc["beats"][0]["clip_path"],
+            })
+            doc["beats"][0].update({"start": 1.0, "end": 3.0, "dur": 2.0})
+            doc_path.write_text(json.dumps(doc), encoding="utf-8")
+            self.write_transcript(project, [
+                {"word": "first", "start": 1.1, "end": 1.5},
+                {"word": "second", "start": 3.1, "end": 3.5},
+            ])
+            calls, generate = self.run_captured(project, durations=[1.2, 2.0, 1.2, 2.0])
+
+        concat_calls = [call for call in calls if call[-1].endswith("aroll_audio.wav")]
+        self.assertEqual(len(concat_calls), 1)
+        concat_call = concat_calls[0]
+        self.assertIn("-filter_complex", concat_call)
+        graph = concat_call[concat_call.index("-filter_complex") + 1]
+        self.assertEqual(graph.count("atrim=duration=1.20"), 2)
+        self.assertIn("concat=n=2:v=0:a=1", graph)
+        self.assertEqual(
+            [segment["start"] for segment in generate.call_args.args[0]["segments"]], [0.0, 1.2]
+        )
+
     def test_centisecond_requested_cut_is_not_shortened_by_binary_float_rounding(self):
         with tempfile.TemporaryDirectory() as tmp:
             project = self.make_project(tmp, "off")
@@ -977,6 +1005,63 @@ class ArollAssemblyTests(unittest.TestCase):
                         if len(durations) == 8:
                             later_event = next(line for line in ass.splitlines() if "beat8" in line)
                             self.assertIn(",0:00:14.21,", later_event)
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg and ffprobe required")
+    def test_real_ffmpeg_short_clips_trim_pcm_audio_to_caption_timeline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "word"
+            project.mkdir()
+            source = project / "source.mp4"
+            clip = project / "clip.mp4"
+            subprocess.run([
+                "ffmpeg", "-y", "-loglevel", "error",
+                "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=24",
+                "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+                "-t", "5", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(source),
+            ], check=True)
+            subprocess.run([
+                "ffmpeg", "-y", "-loglevel", "error",
+                "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=24",
+                "-t", "1.2", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-an", str(clip),
+            ], check=True)
+            doc = {
+                "mode": "aroll", "source_video": str(source), "language": "en",
+                "aspect": "tiny", "caption_mode": "word",
+                "beats": [
+                    {"id": 1, "start": 0.0, "end": 2.0, "dur": 2.0, "clip_path": str(clip)},
+                    {"id": 2, "start": 2.1, "end": 4.1, "dur": 2.0, "clip_path": str(clip)},
+                ],
+            }
+            (project / "beats.json").write_text(json.dumps(doc), encoding="utf-8")
+            captions = project / "captions"
+            captions.mkdir()
+            (captions / "transcript.json").write_text(json.dumps({
+                "schema_version": 1,
+                "source_fingerprint": hashlib.sha256(source.read_bytes()).hexdigest(),
+                "model": "small", "requested_language": "en", "compute_type": "int8", "language": "en",
+                "segments": [
+                    {"start": 0.1, "end": 0.4, "text": "first",
+                     "words": [{"word": "first", "start": 0.1, "end": 0.4}]},
+                    {"start": 2.1, "end": 2.4, "text": "second",
+                     "words": [{"word": "second", "start": 2.1, "end": 2.4}]},
+                ],
+            }), encoding="utf-8")
+            with patch.dict(aroll_assemble.RES, {"tiny": (64, 64)}):
+                aroll_assemble.run(str(project))
+            final = project / "final.mp4"
+            streams = json.loads(subprocess.run([
+                "ffprobe", "-v", "error", "-show_entries", "stream=codec_type,duration",
+                "-of", "json", str(final),
+            ], capture_output=True, text=True, check=True).stdout)["streams"]
+            audio = next(stream for stream in streams if stream["codec_type"] == "audio")
+            video = next(stream for stream in streams if stream["codec_type"] == "video")
+            self.assertLessEqual(abs(float(audio["duration"]) - 2.4), 1024 / 48000)
+            self.assertLessEqual(abs(float(video["duration"]) - 2.4), 1 / aroll_assemble.FPS)
+            second_event = next(
+                line for line in (captions / "captions.ass").read_text(encoding="utf-8").splitlines()
+                if "second" in line
+            )
+            self.assertIn(",0:00:01.20,", second_event)
 
     def test_unknown_caption_mode_fails(self):
         with self.assertRaisesRegex(ValueError, "word, off"):

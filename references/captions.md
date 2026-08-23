@@ -111,9 +111,10 @@ encoded cut so it never reaches past that source interval. To make short
 this is only an A-roll rendering floor (normal ASR beats are at least two
 seconds), not a transcription rule.
 
-Each accepted source cut is extracted as lossless PCM WAV. Video-only H.264
-segments receive their frame count from the cumulative PCM-audio timeline on
-the 24-fps grid, then video and PCM audio are concatenated separately. The
+Each accepted source cut is extracted as lossless PCM WAV and trimmed to its
+effective encoded duration before concatenation. Video-only H.264 segments
+receive their frame count from the cumulative PCM-audio timeline on the 24-fps
+grid, then video and PCM audio are concatenated separately. The
 final has one original-speech AAC encode: `off` stream-copies the separately
 concatenated video, while `word` encodes only the video needed to burn
 subtitles. Neither mode mixes, pads, or duplicates speech. Container, audio,

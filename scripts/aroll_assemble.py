@@ -262,7 +262,7 @@ def run(project_dir):
         ff(["-i", clip, "-filter_complex", fc, "-map", "[v]", "-frames:v", str(frames_this),
             "-c:v", "libx264", "-pix_fmt", "yuv420p", "-an", video_path])
         video_segments.append(video_path)
-        audio_segments.append(audio_path)
+        audio_segments.append((audio_path, encoded_duration))
         effective_beat = dict(beat)
         effective_beat["start"] = float(source_start)
         effective_beat["end"] = float(Decimal(source_start) + encoded_duration)
@@ -283,19 +283,31 @@ def run(project_dir):
     with open(video_list, "w") as f:
         for path in video_segments:
             f.write(ffconcat_file_line(path))
-    audio_list = os.path.join(tmp, "audio_concat_list.txt")
-    with open(audio_list, "w") as f:
-        for path in audio_segments:
-            f.write(ffconcat_file_line(path))
     video_concat = os.path.join(tmp, "aroll_video.mp4")
     ff([
         "-f", "concat", "-safe", "0", "-i", video_list,
         "-map", "0:v:0", "-c:v", "copy", "-an", video_concat,
     ])
     audio_concat = os.path.join(tmp, "aroll_audio.wav")
+    audio_args = []
+    trim_filters = []
+    for index, (audio_path, duration) in enumerate(audio_segments):
+        audio_args.extend(["-i", audio_path])
+        label = "a" if len(audio_segments) == 1 else f"a{index}"
+        trim_filters.append(
+            f"[{index}:a]atrim=duration={duration:.2f},asetpts=PTS-STARTPTS[{label}]"
+        )
+    if len(audio_segments) == 1:
+        audio_graph = trim_filters[0]
+    else:
+        concat_inputs = "".join(f"[a{index}]" for index in range(len(audio_segments)))
+        audio_graph = ";".join([
+            *trim_filters,
+            f"{concat_inputs}concat=n={len(audio_segments)}:v=0:a=1[a]",
+        ])
     ff([
-        "-f", "concat", "-safe", "0", "-i", audio_list,
-        "-map", "0:a:0", "-c:a", "pcm_s16le", audio_concat,
+        *audio_args, "-filter_complex", audio_graph,
+        "-map", "[a]", "-c:a", "pcm_s16le", audio_concat,
     ])
     final = os.path.join(project_dir, "final.mp4")
     total_arg = format(audio_timeline_end, ".2f")
