@@ -40,7 +40,7 @@ The semantic transcript remains:
 
 Cache metadata surrounds, but does not alter, these semantics. `scripts/asr_beats.py` calls this builder once and derives its beats from the returned transcript. `scripts/aroll_assemble.py` reads the same persisted transcript; it never calls a transcriber. It maps source-relative words into the concatenated edit timeline in memory, assigns beat identifiers to prevent inappropriate grouping across cuts, and passes that derived view directly to the existing `generate_ass()` renderer. No second transcript file is written.
 
-Local faster-whisper becomes the canonical A-roll ASR. The existing MuAPI Whisper path is superseded rather than retained as a second backend because it adds a paid remote request, has an incompatible provider result contract, and would reintroduce parallel transcription behavior. The former `source_audio_url` field is not preserved because neither `aroll_clips.py` nor `aroll_assemble.py` consumes it. MuAPI remains unchanged for A-roll visual generation.
+Local faster-whisper becomes the canonical A-roll ASR. The safe multilingual A-roll default is model `small`, device `cpu`, and compute type `int8`, so the workflow does not depend on the available 2 GB GPU. English-only users may explicitly select `distil-small.en` with `cpu` / `int8` as an optimization; Distil-Whisper is not the universal default because it is not the multilingual choice. The existing MuAPI Whisper path is superseded rather than retained as a second backend because it adds a paid remote request, has an incompatible provider result contract, and would reintroduce parallel transcription behavior. The former `source_audio_url` field is not preserved because neither `aroll_clips.py` nor `aroll_assemble.py` consumes it. MuAPI remains unchanged for A-roll visual generation.
 
 ## Source Transcript Cache
 
@@ -102,7 +102,7 @@ Focused unit tests will cover canonical source structure, genuine timestamp pres
 
 Implementation follows red-green-refactor cycles. The existing 28-test baseline and four-file compile baseline are recorded before changes. After implementation, all tests and compile checks are rerun, followed by `git diff --check` and a full diff review.
 
-Real local validation uses an ignored copy of a safe existing A-roll project, or a locally generated short talking-head-style fixture if none exists. It uses faster-whisper `base`, `device=auto`, and `compute_type=default`, confirms real monotonic words and cache reuse, renders word and off variants without MuAPI generation, probes video/audio streams and duration, and inspects representative frames for caption burn-in. Generated media, model cache data, source media, secrets, and the ignored validation project are not committed.
+Real local validation uses an ignored copy of a safe existing A-roll project, or a locally generated short talking-head-style fixture if none exists. It uses the multilingual A-roll defaults faster-whisper `small`, `device=cpu`, and `compute_type=int8`, confirms real monotonic words and cache reuse, renders word and off variants without MuAPI generation, probes video/audio streams and duration, and inspects representative frames for caption burn-in. Generated media, model cache data, source media, secrets, and the ignored validation project are not committed.
 
 ## Documentation and Delivery
 
