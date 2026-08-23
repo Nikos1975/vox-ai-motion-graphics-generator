@@ -770,6 +770,37 @@ class ArollAssemblyTests(unittest.TestCase):
         self.assertEqual(extraction_call[extraction_call.index("-t") + 1], "0.99")
         self.assertEqual(mux_call[mux_call.index("-t") + 1], "0.99")
 
+    def test_exact_centisecond_source_bounds_keep_a_one_second_cut(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = self.make_project(tmp, "off")
+            doc_path = project / "beats.json"
+            doc = json.loads(doc_path.read_text(encoding="utf-8"))
+            doc["beats"][0].update(start=1.01, end=2.01, dur=1.0)
+            doc_path.write_text(json.dumps(doc), encoding="utf-8")
+            calls, _generate = self.run_captured(project, durations=[2.0, 2.0])
+        extraction_call = next(call for call in calls if "-vn" in call)
+        mux_call = next(call for call in calls if "1:a:0" in call)
+        self.assertEqual(extraction_call[extraction_call.index("-ss") + 1], "1.01")
+        self.assertEqual(extraction_call[extraction_call.index("-t") + 1], "1.00")
+        self.assertEqual(mux_call[mux_call.index("-t") + 1], "1.00")
+
+    def test_exact_centisecond_source_bounds_keep_a_hundredth_second_cut(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = self.make_project(tmp, "off")
+            doc_path = project / "beats.json"
+            doc = json.loads(doc_path.read_text(encoding="utf-8"))
+            doc["beats"][0].update(start=0.10, end=0.11, dur=0.01)
+            doc_path.write_text(json.dumps(doc), encoding="utf-8")
+            try:
+                calls, _generate = self.run_captured(project, durations=[2.0, 2.0])
+            except SystemExit as exc:
+                self.fail(f"centisecond source cut was incorrectly skipped: {exc}")
+        extraction_call = next(call for call in calls if "-vn" in call)
+        mux_call = next(call for call in calls if "1:a:0" in call)
+        self.assertEqual(extraction_call[extraction_call.index("-ss") + 1], "0.1")
+        self.assertEqual(extraction_call[extraction_call.index("-t") + 1], "0.01")
+        self.assertEqual(mux_call[mux_call.index("-t") + 1], "0.01")
+
     def test_unprobeable_clip_or_audio_skips_the_beat(self):
         with tempfile.TemporaryDirectory() as tmp:
             project = self.make_project(tmp, "off")
@@ -777,31 +808,67 @@ class ArollAssemblyTests(unittest.TestCase):
                 self.run_captured(project, durations=[2.0, 0.0])
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg and ffprobe required")
-    def test_real_ffmpeg_m4a_extract_does_not_extend_requested_cut(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            project = Path(tmp) / "project"
-            project.mkdir()
-            source = project / "source.mp4"
-            subprocess.run([
-                "ffmpeg", "-y", "-loglevel", "error",
-                "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=24",
-                "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
-                "-t", "2", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(source),
-            ], check=True)
-            (project / "beats.json").write_text(json.dumps({
-                "mode": "aroll",
-                "source_video": str(source),
-                "aspect": "tiny",
-                "caption_mode": "off",
-                "beats": [{
-                    "id": 1, "start": 0.0, "end": 1.0, "dur": 1.0,
-                    "clip_path": str(source),
-                }],
-            }), encoding="utf-8")
-            with patch.dict(aroll_assemble.RES, {"tiny": (64, 64)}):
-                aroll_assemble.run(str(project))
-            # AAC can expose one final 1024-sample encoder frame in the container duration.
-            self.assertLessEqual(aroll_assemble.probe_dur(project / "final.mp4"), 1.03)
+    def test_real_ffmpeg_final_duration_is_bounded_in_off_and_word_modes(self):
+        for caption_mode in ("off", "word"):
+            with self.subTest(caption_mode=caption_mode), tempfile.TemporaryDirectory() as tmp:
+                project = Path(tmp) / caption_mode
+                project.mkdir()
+                source = project / "source.mp4"
+                subprocess.run([
+                    "ffmpeg", "-y", "-loglevel", "error",
+                    "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=24",
+                    "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+                    "-t", "2", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(source),
+                ], check=True)
+                doc = {
+                    "mode": "aroll",
+                    "source_video": str(source),
+                    "language": "en",
+                    "aspect": "tiny",
+                    "caption_mode": caption_mode,
+                    "beats": [{
+                        "id": 1, "start": 0.0, "end": 1.0, "dur": 1.0,
+                        "clip_path": str(source),
+                    }],
+                }
+                (project / "beats.json").write_text(json.dumps(doc), encoding="utf-8")
+                if caption_mode == "word":
+                    caption_dir = project / "captions"
+                    caption_dir.mkdir()
+                    (caption_dir / "transcript.json").write_text(json.dumps({
+                        "schema_version": 1,
+                        "source_fingerprint": hashlib.sha256(source.read_bytes()).hexdigest(),
+                        "model": "small",
+                        "requested_language": "en",
+                        "compute_type": "int8",
+                        "language": "en",
+                        "segments": [{
+                            "start": 0.0, "end": 0.8, "text": "test tone",
+                            "words": [
+                                {"word": "test", "start": 0.0, "end": 0.3},
+                                {"word": "tone", "start": 0.4, "end": 0.8},
+                            ],
+                        }],
+                    }), encoding="utf-8")
+                with patch.dict(aroll_assemble.RES, {"tiny": (64, 64)}):
+                    aroll_assemble.run(str(project))
+                final = project / "final.mp4"
+                # MP4 timestamps can retain a 128-sample (2.667 ms at 48 kHz) AAC tail.
+                # Five milliseconds bounds that container precision without masking ADTS inflation.
+                self.assertLessEqual(aroll_assemble.probe_dur(final), 1.005)
+                streams = json.loads(subprocess.run([
+                    "ffprobe", "-v", "error", "-show_entries", "stream=codec_type,duration",
+                    "-of", "json", str(final),
+                ], capture_output=True, text=True, check=True).stdout)["streams"]
+                audio_streams = [stream for stream in streams if stream["codec_type"] == "audio"]
+                self.assertEqual(len(audio_streams), 1)
+                self.assertGreater(float(audio_streams[0]["duration"]), 0.9)
+                volume = subprocess.run([
+                    "ffmpeg", "-v", "info", "-i", str(final), "-map", "0:a:0",
+                    "-af", "volumedetect", "-f", "null", "-",
+                ], capture_output=True, text=True, check=True).stderr
+                self.assertIn("max_volume:", volume)
+                self.assertNotIn("max_volume: -inf", volume)
 
     def test_unknown_caption_mode_fails(self):
         with self.assertRaisesRegex(ValueError, "word, off"):

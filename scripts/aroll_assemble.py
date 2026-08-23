@@ -7,7 +7,7 @@ import math
 import os
 import subprocess
 import sys
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from pathlib import Path
 
 from captions.transcription import (
@@ -48,6 +48,24 @@ def _encoded_cut_duration(value):
     if duration is None or duration <= 0:
         return 0.0
     return float(Decimal(str(duration)).quantize(Decimal("0.01"), rounding=ROUND_DOWN))
+
+
+def _source_cut(start, end, requested_duration):
+    try:
+        source_start = Decimal(str(start))
+        source_end = Decimal(str(end))
+    except (InvalidOperation, ValueError):
+        return None, 0.0
+    if (
+        not source_start.is_finite()
+        or not source_end.is_finite()
+        or source_start < 0
+        or source_end <= source_start
+    ):
+        return None, 0.0
+    return format(source_start, "f"), _encoded_cut_duration(
+        min(Decimal(str(requested_duration)), source_end - source_start)
+    )
 
 
 def remap_source_transcript(transcript, edit_spans):
@@ -181,18 +199,12 @@ def run(project_dir):
             print(f"[{beat['id']}] no generated clip -- skipped")
             continue
         requested_dur = _encoded_cut_duration(beat.get("dur"))
-        source_start = _finite_number(beat.get("start"))
-        source_end = _finite_number(beat.get("end"))
-        if (
-            requested_dur <= 0
-            or source_start is None
-            or source_end is None
-            or source_start < 0
-            or source_end <= source_start
-        ):
+        source_start, source_cut_dur = _source_cut(
+            beat.get("start"), beat.get("end"), requested_dur
+        )
+        if requested_dur <= 0 or source_start is None:
             print(f"[{beat['id']}] requested duration rounded to zero -- skipped")
             continue
-        source_cut_dur = _encoded_cut_duration(min(requested_dur, source_end - source_start))
         if source_cut_dur <= 0:
             print(f"[{beat['id']}] source cut duration rounded to zero -- skipped")
             continue
@@ -212,7 +224,7 @@ def run(project_dir):
         fc = (f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase,"
               f"crop={W}:{H},setsar=1,fps=24[v]")
         ff(["-i", clip, "-i", audio_path, "-filter_complex", fc, "-map", "[v]", "-map", "1:a:0",
-            "-t", f"{encoded_dur:.2f}", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", out])
+            "-t", f"{encoded_dur:.2f}", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "copy", out])
         muxed.append(out)
         edit_spans.append({"beat": beat, "output_start": output_start, "dur": encoded_dur})
         output_start += encoded_dur
@@ -228,7 +240,11 @@ def run(project_dir):
     final = os.path.join(project_dir, "final.mp4")
     total = sum(span["dur"] for span in edit_spans)
     if caption_mode == "off":
-        ff(["-f", "concat", "-safe", "0", "-i", listf, "-t", f"{total:.2f}", "-c", "copy", final])
+        ff([
+            "-f", "concat", "-safe", "0", "-i", listf, "-t", f"{total:.2f}",
+            "-map", "0:v:0", "-map", "0:a:0",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "copy", final,
+        ])
         print("FINAL:", final, f"({len(muxed)}/{len(doc['beats'])} beats)")
         return
 
